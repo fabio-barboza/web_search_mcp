@@ -8,12 +8,6 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
-# Cache do modelo detectado em runtime, para não bater em GET /models a cada
-# chamada. None = ainda não detectado; string vazia não é um valor válido de
-# cache (senão MODEL="" ficaria preso caso a primeira detecção falhe).
-_resolved_model: str | None = None
-
-
 def _resolve_model() -> str:
     """Devolve o nome do modelo a usar.
 
@@ -23,12 +17,14 @@ def _resolve_model() -> str:
     "status" de load/unload em routers tipo llama.cpp/llama-swap; providers
     OpenAI-compat genéricos (vLLM, OpenAI, etc.) não expõem isso, então nesse
     caso caímos no único modelo da lista, ou pedimos para o usuário nomear.
+
+    Sem cache: reconsulta a cada chamada. Um cache preso ao processo detecta
+    o modelo certo uma vez e insiste nele depois, mesmo que o usuário troque
+    de modelo no client (ex. webui) — daí o MCP força reload do modelo velho
+    a cada tool call, brigando com o client pelo slot do router.
     """
-    global _resolved_model
     if config.MODEL:
         return config.MODEL
-    if _resolved_model:
-        return _resolved_model
 
     try:
         resp = requests.get(f"{config.MODEL_BASE_URL}/models", timeout=config.MODEL_TIMEOUT)
@@ -48,7 +44,7 @@ def _resolve_model() -> str:
             loaded.append(item["id"])
 
     if loaded:
-        _resolved_model = loaded[0]
+        resolved = loaded[0]
         # Com um modelo residente a escolha é óbvia; com vários ela é a ordem
         # da lista, que não quer dizer nada. Avisar porque o sintoma é mudo:
         # a pesquisa continua funcionando, só que no modelo errado.
@@ -56,16 +52,16 @@ def _resolve_model() -> str:
             logger.warning(
                 "_resolve_model: %d modelos carregados (%s); usando o primeiro: %s. "
                 "Defina MODEL no .env para escolher.",
-                len(loaded), ", ".join(loaded), _resolved_model,
+                len(loaded), ", ".join(loaded), resolved,
             )
         else:
-            logger.info("_resolve_model: detectado modelo carregado: %s", _resolved_model)
-        return _resolved_model
+            logger.info("_resolve_model: detectado modelo carregado: %s", resolved)
+        return resolved
 
     if len(items) == 1:
-        _resolved_model = items[0]["id"]
-        logger.info("_resolve_model: único modelo disponível: %s", _resolved_model)
-        return _resolved_model
+        resolved = items[0]["id"]
+        logger.info("_resolve_model: único modelo disponível: %s", resolved)
+        return resolved
 
     logger.error(
         "_resolve_model: não deu para detectar o modelo carregado em %s/models "
