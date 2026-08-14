@@ -1,0 +1,102 @@
+services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: searxng-valkey
+    restart: unless-stopped
+    command: valkey-server --save 30 1 --loglevel warning
+    networks:
+      - searxng
+    volumes:
+      - valkey-data:/data
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8886:8080"
+    networks:
+      - searxng
+    volumes:
+      - ./data:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8886/
+      - SEARXNG_SECRET=password123
+      - SEARXNG_REDIS_URL=redis://valkey:6379/0
+      - UWSGI_WORKERS=4
+      - UWSGI_THREADS=4
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
+    depends_on:
+      valkey:
+        condition: service_healthy
+
+  mcp-searxng:
+    image: isokoliuk/mcp-searxng:latest
+    container_name: mcp-searxng
+    restart: unless-stopped
+    stdin_open: true
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+      - MCP_HTTP_PORT=8887
+    networks:
+      - searxng
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
+    depends_on:
+      - searxng
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: searxng-caddy
+    restart: unless-stopped
+    ports:
+      - "8887:8887"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    networks:
+      - searxng
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
+    depends_on:
+      - mcp-searxng
+
+networks:
+  searxng:
+    driver: bridge
+
+volumes:
+  valkey-data:
+  caddy-data:

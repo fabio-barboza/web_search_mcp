@@ -1,0 +1,9 @@
+.venv/
+.env
+.idea/
+__pycache__/
+*.pyc
+.pytest_cache/
+evals/results/
+dist/
+searxng/data/

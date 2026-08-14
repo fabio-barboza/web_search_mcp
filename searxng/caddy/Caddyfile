@@ -1,0 +1,40 @@
+{
+	auto_https off
+	admin off
+	persist_config off
+}
+
+:8887 {
+	@options method OPTIONS
+	handle @options {
+		header Access-Control-Allow-Origin "{http.request.header.Origin}"
+		header Vary "Origin"
+		header Access-Control-Allow-Methods "GET, POST, OPTIONS, DELETE"
+		header Access-Control-Allow-Headers "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, Accept, Last-Event-ID, Cache-Control"
+		header Access-Control-Allow-Credentials "true"
+		header Access-Control-Max-Age "3600"
+		respond 204
+	}
+
+	@unauthorized not header Authorization "Bearer password123"
+	handle @unauthorized {
+		header Access-Control-Allow-Origin "{http.request.header.Origin}"
+		header Vary "Origin"
+		respond "Unauthorized" 401
+	}
+
+	header Access-Control-Allow-Origin "{http.request.header.Origin}"
+	header Vary "Origin"
+	header Access-Control-Expose-Headers "Mcp-Session-Id"
+	header Access-Control-Allow-Credentials "true"
+
+	reverse_proxy mcp-searxng:8887 {
+		header_up Host {upstream_hostport}
+		header_down -Access-Control-Allow-Origin
+		header_down -Access-Control-Allow-Methods
+		header_down -Access-Control-Allow-Headers
+		header_down -Access-Control-Expose-Headers
+		header_down -Access-Control-Allow-Credentials
+		header_down -Vary
+	}
+}
