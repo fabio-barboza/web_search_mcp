@@ -2,6 +2,7 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -106,6 +107,34 @@ def _generate_queries(question: str) -> list[str]:
     return queries[:5]
 
 
+# Parâmetros de tracking: não mudam o conteúdo da página, só a string da
+# URL — sem removê-los, a mesma matéria vinda de duas buscas conta como duas
+# URLs diferentes e o sinal de concordância se perde.
+_TRACKING_KEYS = {"fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "ref", "src"}
+
+
+def _normalize_url(url: str) -> str:
+    """Chave de dedupe: minúsculas no host, sem tracking/fragmento/barra final.
+
+    Só a CHAVE — a URL original segue intacta no resultado e no dossiê,
+    porque é ela que abre no navegador de quem recebe a lista de fontes.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    query = urlencode(
+        [
+            (k, v)
+            for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if not k.startswith("utm_") and k not in _TRACKING_KEYS
+        ]
+    )
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), query, "")
+    )
+
+
 def _search_one(args: tuple[str, bool]) -> list[dict]:
     """Busca uma query, com o fallback de data. Usada em paralelo."""
     query, recent = args
@@ -161,6 +190,17 @@ def _panorama_seeds(query: str, recent: bool) -> list[dict]:
     return [{"url": u, "title": "", "content": ""} for u in seeds]
 
 
+def _search_one_safe(args: tuple[str, bool]) -> list[dict]:
+    """_search_one que não derruba as irmãs: variante que falhar vira lista
+    vazia. A busca da pergunta original continua propagando erro — se ela
+    falhou, o SearXNG está fora e não há o que aproveitar."""
+    try:
+        return _search_one(args)
+    except Exception as e:
+        logger.error("_search_one_safe: busca da variante %r falhou: %s", args[0], e)
+        return []
+
+
 def _collect_links(query: str, recent: bool) -> list[dict]:
     """Roda várias buscas em paralelo e mescla os resultados.
 
@@ -179,7 +219,7 @@ def _collect_links(query: str, recent: bool) -> list[dict]:
     extras = [q for q in queries if q != query]
     if extras:
         with ThreadPoolExecutor(max_workers=len(extras)) as pool:
-            per_query = list(pool.map(_search_one, [(q, recent) for q in extras]))
+            per_query = list(pool.map(_search_one_safe, [(q, recent) for q in extras]))
     else:
         per_query = []
     per_query.insert(0, original_results)
@@ -188,8 +228,10 @@ def _collect_links(query: str, recent: bool) -> list[dict]:
 
     seeds = _panorama_seeds(query, recent)
     if seeds:
-        seeded = {s["url"] for s in seeds}
-        merged = seeds + [r for r in merged if r.get("url") not in seeded]
+        seeded = {_normalize_url(s["url"]) for s in seeds}
+        merged = seeds + [
+            r for r in merged if _normalize_url(r.get("url", "")) not in seeded
+        ]
     return merged
 
 
@@ -216,29 +258,41 @@ def _merge_results(per_query: list[list[dict]]) -> list[dict]:
     """
     agreement: dict[str, int] = {}
     for results in per_query:
-        for url in {r.get("url", "") for r in results if r.get("url")}:
-            agreement[url] = agreement.get(url, 0) + 1
+        for key in {_normalize_url(r["url"]) for r in results if r.get("url")}:
+            agreement[key] = agreement.get(key, 0) + 1
 
     def rank(r: dict) -> tuple[int, float]:
-        url = r.get("url", "")
         try:
             score = float(r.get("score") or 0)
         except (TypeError, ValueError):
             score = 0.0
-        return -agreement.get(url, 0), -score
+        return -agreement.get(_normalize_url(r.get("url", "")), 0), -score
 
     ranked = [sorted(results, key=rank) for results in per_query]
 
+    # Teto por domínio: sem ele, uma busca cujo top-10 é todo do mesmo site
+    # enche a reserva com um veículo só e o dossiê perde variedade (medido:
+    # metade das fontes de um panorama saiu da mesma redação). 0 = sem teto.
     merged: list[dict] = []
     seen: set[str] = set()
+    per_domain: dict[str, int] = {}
     for i in range(_search.max_results):
         for results in ranked:
             if i >= len(results):
                 continue
             url = results[i].get("url", "")
-            if url and url not in seen:
-                merged.append(results[i])
-                seen.add(url)
+            key = _normalize_url(url)
+            if not url or key in seen:
+                continue
+            domain = urlsplit(url).netloc.lower()
+            if (
+                config.RESEARCH_MAX_PER_DOMAIN
+                and per_domain.get(domain, 0) >= config.RESEARCH_MAX_PER_DOMAIN
+            ):
+                continue
+            merged.append(results[i])
+            seen.add(key)
+            per_domain[domain] = per_domain.get(domain, 0) + 1
     return merged[: config.RESEARCH_POOL_SIZE]
 
 

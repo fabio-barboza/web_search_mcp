@@ -91,6 +91,11 @@ RESEARCH_POOL_SIZE = int(os.getenv("RESEARCH_POOL_SIZE", "20"))
 # reserva inteira e estouraria a latência.
 RESEARCH_MAX_WAVES = int(os.getenv("RESEARCH_MAX_WAVES", "4"))
 
+# Máximo de URLs do MESMO domínio na reserva de candidatos. Sem teto, uma
+# busca cujo top-10 é todo de um site enche o dossiê com um veículo só.
+# 0 = sem limite.
+RESEARCH_MAX_PER_DOMAIN = int(os.getenv("RESEARCH_MAX_PER_DOMAIN", "2"))
+
 # Teto de caracteres POR PÁGINA no dossiê (só no research; o read_url segue
 # lendo a página inteira, porque lá a URL foi pedida de propósito).
 #

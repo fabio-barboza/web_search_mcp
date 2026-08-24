@@ -248,3 +248,67 @@ class TestPanoramaSeeds:
 
     def test_non_news_question_gets_no_seeds(self):
         assert research._panorama_seeds("qual a cotação do dólar hoje?", True) == []
+
+
+class TestNormalizeUrl:
+    def test_strips_tracking_fragment_and_trailing_slash(self):
+        url = "https://Site.com/artigo/?utm_source=x&utm_campaign=y&fbclid=abc&id=7#secao"
+        assert research._normalize_url(url) == "https://site.com/artigo?id=7"
+
+    def test_equivalent_urls_share_key(self):
+        a = "https://g1.globo.com/noticia/?utm_source=twitter"
+        b = "https://g1.globo.com/noticia/"
+        assert research._normalize_url(a) == research._normalize_url(b)
+
+    def test_invalid_url_returned_as_is(self):
+        assert research._normalize_url("http://[invalido") == "http://[invalido"
+
+
+class TestMergeDomainCap:
+    def test_same_story_with_tracking_counts_as_agreement(self):
+        per_query = [
+            [{"url": "https://a.com/x?utm_source=s1", "score": 1}],
+            [{"url": "https://a.com/x/", "score": 1}],
+            [{"url": "https://b.com/y", "score": 9}],
+        ]
+        with patch.object(config, "RESEARCH_MAX_PER_DOMAIN", 0):
+            merged = research._merge_results(per_query)
+        urls = [r["url"] for r in merged]
+        # a.com/x achada por 2 buscas ganha de b.com/y (score alto, 1 busca)
+        # e entra uma vez só.
+        assert urls[0].startswith("https://a.com/x")
+        assert len([u for u in urls if "a.com/x" in u]) == 1
+
+    def test_per_domain_cap(self):
+        per_query = [[
+            {"url": f"https://mesmo.com/{i}", "score": 10 - i} for i in range(5)
+        ] + [{"url": "https://outro.com/1", "score": 0.1}]]
+        with patch.object(config, "RESEARCH_MAX_PER_DOMAIN", 2):
+            merged = research._merge_results(per_query)
+        domains = [research.urlsplit(r["url"]).netloc for r in merged]
+        assert domains.count("mesmo.com") == 2
+        assert "outro.com" in domains
+
+    def test_cap_zero_means_unlimited(self):
+        per_query = [[{"url": f"https://mesmo.com/{i}"} for i in range(5)]]
+        with patch.object(config, "RESEARCH_MAX_PER_DOMAIN", 0):
+            merged = research._merge_results(per_query)
+        assert len(merged) == 5
+
+
+class TestSearchOneSafe:
+    def test_variant_failure_returns_empty_not_raise(self):
+        with patch.object(research, "_search_one", side_effect=RuntimeError("boom")):
+            assert research._search_one_safe(("variante", False)) == []
+
+    def test_variant_failure_does_not_kill_collect(self):
+        def fake_search_one(args):
+            query, _ = args
+            if query == "pergunta":
+                return [{"url": "http://ok.com"}]
+            raise RuntimeError("variante quebrou")
+
+        with patch("web_search_mcp.tools.research._generate_queries", return_value=["pergunta", "ruim"]), \
+             patch.object(research, "_search_one", side_effect=fake_search_one):
+            results = research._collect_links("pergunta", False)
+        assert [r["url"] for r in results] == ["http://ok.com"]
