@@ -96,6 +96,12 @@ RESEARCH_MAX_WAVES = int(os.getenv("RESEARCH_MAX_WAVES", "4"))
 # 0 = sem limite.
 RESEARCH_MAX_PER_DOMAIN = int(os.getenv("RESEARCH_MAX_PER_DOMAIN", "2"))
 
+# Orçamento de páginas específico do panorama de notícias (capas + matérias
+# do topo de cada capa). Maior que o normal porque o caso precisa de
+# cobertura E profundidade ao mesmo tempo; o custo extra fica restrito a
+# esse tipo de pergunta.
+RESEARCH_PANORAMA_PAGES = int(os.getenv("RESEARCH_PANORAMA_PAGES", "10"))
+
 # Teto de caracteres POR PÁGINA no dossiê (só no research; o read_url segue
 # lendo a página inteira, porque lá a URL foi pedida de propósito).
 #

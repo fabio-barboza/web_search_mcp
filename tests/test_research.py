@@ -312,3 +312,60 @@ class TestSearchOneSafe:
              patch.object(research, "_search_one", side_effect=fake_search_one):
             results = research._collect_links("pergunta", False)
         assert [r["url"] for r in results] == ["http://ok.com"]
+
+
+class TestArticleLinks:
+    HTML = """
+    <html><body>
+      <a href="/politica/noticia/2026/08/24/manchete-principal-do-dia.ghtml">Manchete principal</a>
+      <a href="/esportes/">Esportes</a>
+      <a href="https://outro-site.com/2026/08/24/materia-externa.html">Externa</a>
+      <a href="/news/articles/c1234abcd">Article BBC-style</a>
+      <a href="/coluna/um-slug-bem-comprido-com-muitas-palavras-aqui">Slug longo</a>
+      <a href="/politica/noticia/2026/08/24/manchete-principal-do-dia.ghtml?utm_source=x">Duplicada</a>
+      <a href="#topo">Âncora</a>
+    </body></html>
+    """
+
+    def test_extracts_article_links_in_dom_order(self):
+        links = research._article_links("https://www.site.com/", self.HTML, 10)
+        urls = [u for u, _ in links]
+        assert urls == [
+            "https://www.site.com/politica/noticia/2026/08/24/manchete-principal-do-dia.ghtml",
+            "https://www.site.com/news/articles/c1234abcd",
+            "https://www.site.com/coluna/um-slug-bem-comprido-com-muitas-palavras-aqui",
+        ]
+        assert links[0][1] == "Manchete principal"
+
+    def test_respects_limit(self):
+        links = research._article_links("https://www.site.com/", self.HTML, 1)
+        assert len(links) == 1
+
+    def test_invalid_html_returns_empty(self):
+        assert research._article_links("https://x.com/", "", 5) == []
+
+
+class TestExpandSeeds:
+    def test_interleaves_across_fronts_and_falls_back(self):
+        def fake_download(url):
+            if "a.com" in url:
+                return True, (
+                    '<a href="/2026/08/24/a1-materia-um">A1</a>'
+                    '<a href="/2026/08/24/a2-materia-dois">A2</a>'
+                )
+            return False, "(falhou)"
+
+        seeds = [
+            {"url": "https://a.com/", "title": "", "content": ""},
+            {"url": "https://b.com/", "title": "", "content": ""},
+        ]
+        with patch.object(research._scraper, "_download", side_effect=fake_download):
+            out = research._expand_seeds(seeds)
+        urls = [r["url"] for r in out]
+        # híbrido: capas primeiro (agenda), depois as matérias intercaladas
+        assert urls == [
+            "https://a.com/",
+            "https://b.com/",
+            "https://a.com/2026/08/24/a1-materia-um",
+            "https://a.com/2026/08/24/a2-materia-dois",
+        ]
