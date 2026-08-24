@@ -467,6 +467,39 @@ def _is_hub_page(url: str, text: str) -> bool:
     return len(lines) >= _HUB_MIN_LINES and prose <= _HUB_MAX_PROSE_LINES
 
 
+# REGRA: marcador de referência só pode aparecer se o link estiver NO TEXTO.
+#
+# "[n]" sozinho depende da legenda numerada, que fica no fim da resposta e é
+# exatamente o que o agente de chat corta ao reescrever (observado no Open
+# WebUI: resumo chega com [1] [9] e nenhuma lista de URLs). O usuário fica
+# com um número que não resolve para nada e não tem como conferir o fato.
+#
+# Então a citação vira link markdown com a URL embutida: o link viaja dentro
+# da frase, sobrevive ao corte da legenda e é clicável. Montado em código a
+# partir da URL realmente lida — nunca pedido ao modelo, que erra URL mas
+# acerta o número.
+_CITATION_RE = re.compile(r"[ \t]*\[(\d{1,2})\]")
+
+
+def _label_citations(summary: str, pages_read: list[tuple[dict, str, str]]) -> str:
+    """Troca [n] por link markdown [dominio](url); apaga [n] sem fonte."""
+    links: dict[int, str] = {}
+    for i, (_, url, _) in enumerate(pages_read, 1):
+        host = urlsplit(url).netloc.lower()
+        host = host[4:] if host.startswith("www.") else host
+        links[i] = f"[{host}]({url})"
+
+    def swap(m: re.Match) -> str:
+        n = int(m.group(1))
+        # Número fora da lista é citação inventada: sai do texto, junto com o
+        # espaço que o precedia, senão sobra " ." no meio da frase.
+        if n not in links:
+            return ""
+        return f" {links[n]}"
+
+    return _CITATION_RE.sub(swap, summary)
+
+
 def _read_pages(
     candidates: list[dict],
     page_budget: int | None = None,
@@ -754,6 +787,8 @@ def research_web(query: str, recent: bool = False) -> str:
             f"lidas com sucesso e podem ser abertas com read_url)"
         )
 
+    summary = _label_citations(summary, pages_read)
+
     # A legenda numerada vai por código, não pelo resumo: o modelo cita [n]
     # e aqui sabemos exatamente qual URL é cada número — atribuição de fonte
     # nunca é redigida pelo modelo. O _read_pages já garantiu que todas
@@ -766,11 +801,12 @@ def research_web(query: str, recent: bool = False) -> str:
     # um erro novo entrou na reescrita). A nota abaixo é endereçada a esse
     # agente — é a única camada onde dá para defender a atribuição.
     relay_note = (
-        "Nota para o agente: cada [n] do resumo aponta para a URL de mesmo "
-        "número na lista abaixo. Ao apresentar ao usuário, mantenha a "
-        "atribuição POR ITEM (o [n] ou a URL correspondente) e as datas. "
-        "Não substitua por nomes de veículos nem condense as fontes numa "
-        "lista genérica no rodapé."
+        "Nota para o agente: cada fato do resumo termina com um link "
+        "markdown para a página de onde saiu. Ao apresentar ao usuário, "
+        "mantenha esses links INTEIROS e as datas — são a atribuição por "
+        "item. Nunca troque um link por um número entre colchetes, por nome "
+        "de veículo, nem condense tudo numa lista genérica no rodapé: "
+        "marcador sem link é referência que o usuário não consegue conferir."
     )
 
     now = datetime.now().astimezone()

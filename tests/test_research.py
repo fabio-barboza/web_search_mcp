@@ -1,3 +1,4 @@
+import re
 from unittest.mock import patch
 
 import pytest
@@ -551,3 +552,41 @@ class TestHubPage:
              patch.object(config, "RESEARCH_MAX_WAVES", 1):
             assert research._read_pages(candidates, reject_index=True) == []
             assert len(research._read_pages(candidates, reject_index=False)) == 1
+
+
+class TestLabelCitations:
+    """REGRA: marcador de referência só aparece com o link no texto."""
+
+    _PAGES = [
+        ({}, "https://g1.globo.com/economia/noticia/2026/braskem.ghtml", ""),
+        ({}, "https://www.bbc.com/news/articles/c93v", ""),
+    ]
+
+    def test_citation_becomes_inline_link(self):
+        out = research._label_citations("PT recorreu contra ônibus [1].", self._PAGES)
+        assert out == (
+            "PT recorreu contra ônibus "
+            "[g1.globo.com](https://g1.globo.com/economia/noticia/2026/braskem.ghtml)."
+        )
+
+    def test_no_bare_numeric_marker_survives(self):
+        out = research._label_citations("A [1]. B [2]. C [7].", self._PAGES)
+        assert not re.search(r"\[\d+\]", out), out
+
+    def test_every_marker_carries_a_url(self):
+        out = research._label_citations("A [1]. B [2].", self._PAGES)
+        assert out.count("](http") == 2
+
+    def test_www_stripped_from_label(self):
+        out = research._label_citations("Kiev [2].", self._PAGES)
+        assert "[bbc.com](https://www.bbc.com/news/articles/c93v)" in out
+
+    def test_invented_citation_removed(self):
+        assert research._label_citations("Fato sem fonte [7].", self._PAGES) == "Fato sem fonte."
+
+    def test_text_without_markers_untouched(self):
+        texto = "Resumo sem nenhuma citação."
+        assert research._label_citations(texto, self._PAGES) == texto
+
+    def test_no_pages_strips_everything(self):
+        assert research._label_citations("Alegação [1] solta [2].", []) == "Alegação solta."

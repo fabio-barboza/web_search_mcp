@@ -47,6 +47,23 @@ Known debt against this rule: the news-panorama path (`_SEEDS_BR`,
 pre-dates this rule. Do not extend it, do not copy its shape for another
 subject.
 
+## MANDATORY: a citation marker requires its link in the text
+
+Never emit a reference marker that the reader cannot resolve from the text
+alone. `[1]`, `[2]` and friends depend on a numbered legend at the end of
+the answer — and the calling agent routinely drops that legend when it
+rewrites the summary (observed in Open WebUI: markers arrive, the URL list
+does not). What reaches the user is a number pointing at nothing, next to a
+fact they cannot verify.
+
+So every citation carries its own URL inline, as a markdown link built in
+code from the page that was actually read (`_label_citations`). A marker
+with no link must not exist: a number the model invented for a source that
+is not in the list is deleted from the summary, not left dangling.
+
+This holds for anything the tool returns, now and later. If a future format
+change makes attribution depend on a separate block again, it is wrong.
+
 ## Commands
 
 ```bash
