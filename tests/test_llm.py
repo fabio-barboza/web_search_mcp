@@ -21,13 +21,6 @@ def _mock_models_response(data):
     return resp
 
 
-@pytest.fixture(autouse=True)
-def _reset_resolved_model_cache():
-    llm._resolved_model = None
-    yield
-    llm._resolved_model = None
-
-
 class TestChat:
     def test_payload_shape_and_auth_header(self):
         # EXTRA_SYSTEM_PROMPT vem do .env do host; zerado aqui para o teste
@@ -98,10 +91,43 @@ class TestResolveModel:
             with pytest.raises(RuntimeError):
                 llm._resolve_model()
 
-    def test_result_is_cached(self):
+    def test_not_cached_requeries_every_call(self):
+        # Sem cache de propósito: o modelo carregado no router pode mudar
+        # entre chamadas (ver docstring de _resolve_model).
         data = [{"id": "a", "status": {"value": "loaded"}}]
         with patch.object(config, "MODEL", ""), \
              patch("web_search_mcp.llm.requests.get", return_value=_mock_models_response(data)) as get:
             llm._resolve_model()
             llm._resolve_model()
-        assert get.call_count == 1
+        assert get.call_count == 2
+
+
+class TestContextTokens:
+    def test_detects_ctx_size_from_llamacpp_args(self):
+        data = [{
+            "id": "m",
+            "status": {"value": "loaded", "args": ["llama-server", "--ctx-size", "131072"]},
+        }]
+        with patch.object(config, "MODEL", ""), \
+             patch("web_search_mcp.llm.requests.get", return_value=_mock_models_response(data)):
+            assert llm.context_tokens() == 131072
+
+    def test_falls_back_when_no_args(self):
+        data = [{"id": "m", "status": {"value": "loaded"}}]
+        with patch.object(config, "MODEL", ""), \
+             patch("web_search_mcp.llm.requests.get", return_value=_mock_models_response(data)):
+            assert llm.context_tokens() == config.MODEL_CONTEXT_TOKENS
+
+    def test_falls_back_on_network_error(self):
+        with patch.object(config, "MODEL", ""), \
+             patch("web_search_mcp.llm.requests.get", side_effect=requests.ConnectionError("down")):
+            assert llm.context_tokens() == config.MODEL_CONTEXT_TOKENS
+
+    def test_explicit_model_uses_its_entry(self):
+        data = [
+            {"id": "outro", "status": {"value": "loaded", "args": ["--ctx-size", "8192"]}},
+            {"id": "forcado", "status": {"value": "unloaded", "args": ["--ctx-size", "262144"]}},
+        ]
+        with patch.object(config, "MODEL", "forcado"), \
+             patch("web_search_mcp.llm.requests.get", return_value=_mock_models_response(data)):
+            assert llm.context_tokens() == 262144

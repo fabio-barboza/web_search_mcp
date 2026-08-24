@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import requests
 
 from .. import config
-from ..llm import chat
+from ..llm import chat, context_tokens
 from ..util.scraper import WebScraper
 from ..util.searxng import SearXNG
 
@@ -23,7 +23,10 @@ _QUERIES_INSTRUCTION = (
     "distintos. Uma busca por linha, sem numerar, sem explicar. Use os "
     "termos que apareceriam na página procurada, não a pergunta inteira. "
     "Se a pergunta for sobre uma pessoa, inclua buscas que combinem o nome "
-    "com onde ela apareceria (github, linkedin, currículo, empresa)."
+    "com onde ela apareceria (github, linkedin, currículo, empresa). "
+    "Se o assunto tiver boa cobertura internacional (tecnologia, ciência, "
+    "notícia mundial), escreva UMA das buscas em inglês — as fontes "
+    "internacionais de referência costumam ter o material mais completo."
 )
 
 _BASE_INSTRUCTION = (
@@ -33,7 +36,10 @@ _BASE_INSTRUCTION = (
     "da fonte de cada fato e a data/hora do dado quando houver. Ignore "
     "páginas irrelevantes ou que falharam. Nunca invente nada: se o "
     "material não responder, diga exatamente o que faltou. Não copie o "
-    "conteúdo bruto das páginas."
+    "conteúdo bruto das páginas. Fontes em outros idiomas valem tanto "
+    "quanto as em português: traduza os fatos delas com fidelidade, "
+    "mantendo nomes próprios, siglas e termos técnicos na forma original "
+    "quando não houver tradução consagrada."
 )
 
 _RECENT_INSTRUCTION = (
@@ -188,8 +194,12 @@ _CHARS_PER_TOKEN = 2.5
 
 
 def _dossier_char_budget() -> int:
-    """Quantos caracteres de dossiê cabem na janela do modelo."""
-    usable = config.MODEL_CONTEXT_TOKENS - config.MODEL_RESERVE_TOKENS
+    """Quantos caracteres de dossiê cabem na janela do modelo.
+
+    context_tokens() detecta a janela real do modelo carregado quando o
+    provider a expõe (llama-swap); MODEL_CONTEXT_TOKENS é o fallback.
+    """
+    usable = context_tokens() - config.MODEL_RESERVE_TOKENS
     return max(int(usable * _CHARS_PER_TOKEN), 0)
 
 

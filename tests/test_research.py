@@ -1,7 +1,16 @@
 from unittest.mock import patch
 
+import pytest
+
 from web_search_mcp import config
 from web_search_mcp.tools import research
+
+
+@pytest.fixture(autouse=True)
+def _offline_context_tokens(monkeypatch):
+    """context_tokens() consulta /models na rede; aqui ele espelha o config,
+    então os testes que ajustam MODEL_CONTEXT_TOKENS seguem valendo."""
+    monkeypatch.setattr(research, "context_tokens", lambda: config.MODEL_CONTEXT_TOKENS)
 
 
 class TestGenerateQueries:
