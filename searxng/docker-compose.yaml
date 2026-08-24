@@ -35,6 +35,11 @@ services:
       - searxng
     volumes:
       - ./data:/etc/searxng:rw
+      # Config versionada no repo, montada por cima do data/: já vem com
+      # formats json (sem ele o research_web leva 403) e a curadoria de
+      # fontes prioritárias. Sem este mount o SearXNG geraria um settings.yml
+      # padrão no primeiro boot, que precisaria de edição manual.
+      - ./settings.yml:/etc/searxng/settings.yml:ro
     environment:
       - SEARXNG_BASE_URL=http://localhost:8886/
       - SEARXNG_SECRET=password123

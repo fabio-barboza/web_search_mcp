@@ -91,12 +91,18 @@ unauthenticated scraping/LLM-proxying to the whole network.
 ## searxng/
 
 Docker compose stack for a local SearXNG instance the server depends on.
+`searxng/settings.yml` is tracked and mounted read-only over
+`/etc/searxng/settings.yml`, so a fresh clone boots ready: `formats: [html,
+json]` (without json, `research_web` gets 403) and a curated `hostnames:`
+block (high_priority for reference news/tech/science/games/AI sources,
+low_priority for content farms) that drives result ranking via the SearXNG
+score. `data/` stays gitignored for the runtime files SearXNG writes.
+
 The *live* deployment on this machine lives outside the repo, in
-`/home/fabio/services/searxng` (config at `data/settings.yml`, mounted at
-`/etc/searxng`; editable from the host, `docker restart searxng` after).
-Its settings carry a curated `hostnames:` block (high_priority for
-reference news/tech/science sources, low_priority for content farms) that
-drives `research_web`'s result ranking via the SearXNG score.
+`/home/fabio/services/searxng` (own compose, config at `data/settings.yml`,
+editable from the host; `docker restart searxng` after edits). Changes made
+there should be mirrored into the repo's `searxng/settings.yml` and
+vice-versa.
 First boot writes `searxng/data/settings.yml` (gitignored) with
 `formats: [html]` — must be hand-edited to add `json` or `research_web`'s
 `format=json` requests get a 403.
