@@ -1,7 +1,9 @@
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
@@ -521,6 +523,52 @@ def _summarize(query: str, dossier: str, recent: bool) -> str:
     )
 
 
+# Anti-loop: agente de chat em modo tool-calling às vezes re-chama a
+# pesquisa em círculo, reformulando a mesma pergunta (observado no Open
+# WebUI com qwen3.6:35B no-think: prompt vago sobre BG3 → chamadas sem
+# parar). Instrução na docstring não segura loop; devolver o resultado
+# anterior na hora segura — o retorno é instantâneo (sem busca nem LLM) e
+# vem com ordem explícita de parada.
+_REPEAT_TTL_SECONDS = 600
+_REPEAT_MAX_ENTRIES = 50
+_REPEAT_SIMILARITY = 0.8
+_recent_calls: dict[str, tuple[float, str]] = {}
+
+_REPEAT_NOTE = (
+    "AVISO: esta pergunta (ou uma quase igual) acabou de ser pesquisada "
+    "nesta mesma conversa. O resultado abaixo é o MESMO de antes — "
+    "pesquisar de novo não traz material novo. NÃO chame research_web "
+    "outra vez para esta pergunta: responda ao usuário com o que está "
+    "abaixo, e se algo faltar, diga ao usuário o que faltou.\n\n"
+)
+
+
+def _repeat_key(query: str) -> str:
+    return " ".join(query.lower().split())
+
+
+def _cached_result(query: str) -> str | None:
+    """Resultado recente de pergunta igual ou quase igual, se houver."""
+    now = time.monotonic()
+    for k in [k for k, (ts, _) in _recent_calls.items() if now - ts > _REPEAT_TTL_SECONDS]:
+        del _recent_calls[k]
+    key = _repeat_key(query)
+    hit = _recent_calls.get(key)
+    if hit:
+        return hit[1]
+    for k, (_, result) in _recent_calls.items():
+        if SequenceMatcher(None, key, k).ratio() >= _REPEAT_SIMILARITY:
+            return result
+    return None
+
+
+def _remember_result(query: str, result: str) -> None:
+    if len(_recent_calls) >= _REPEAT_MAX_ENTRIES:
+        oldest = min(_recent_calls, key=lambda k: _recent_calls[k][0])
+        del _recent_calls[oldest]
+    _recent_calls[_repeat_key(query)] = (time.monotonic(), result)
+
+
 def research_web(query: str, recent: bool = False) -> str:
     """Pesquisa na web e devolve um resumo com fontes.
 
@@ -547,6 +595,11 @@ def research_web(query: str, recent: bool = False) -> str:
     """
     logger.info("research_web chamada: query=%r recent=%s", query, recent)
 
+    cached = _cached_result(query)
+    if cached is not None:
+        logger.warning("research_web: repetição detectada, devolvendo resultado anterior: query=%r", query)
+        return _REPEAT_NOTE + cached
+
     try:
         results = _collect_links(query, recent)
     except requests.RequestException as e:
@@ -555,12 +608,21 @@ def research_web(query: str, recent: bool = False) -> str:
 
     if not results:
         logger.info("research_web: nenhum resultado para query=%r", query)
-        return "Nenhum resultado encontrado."
+        # Também entra no cache anti-loop: resultado vazio é o gatilho mais
+        # comum de re-chamada em círculo.
+        outcome = (
+            "Nenhum resultado encontrado. Não repita a busca com a mesma "
+            "pergunta reescrita; diga ao usuário que não encontrou."
+        )
+        _remember_result(query, outcome)
+        return outcome
 
     pages_read = _read_pages(results, _page_budget(query, recent))
     if not pages_read:
         logger.error("research_web: todas as %d páginas candidatas falharam para query=%r", len(results), query)
-        return "Nenhuma das páginas encontradas pôde ser lida."
+        outcome = "Nenhuma das páginas encontradas pôde ser lida."
+        _remember_result(query, outcome)
+        return outcome
 
     dossier = _render_dossier(pages_read)
     try:
@@ -601,4 +663,6 @@ def research_web(query: str, recent: bool = False) -> str:
         f"({utc_now.strftime('%H:%M')} UTC)."
     )
     logger.info("research_web ok: query=%r páginas_lidas=%d", query, len(pages_read))
-    return f"{stamp}\n\n{summary}\n\n{relay_note}\n\nURLs consultadas:\n{sources}"
+    result = f"{stamp}\n\n{summary}\n\n{relay_note}\n\nURLs consultadas:\n{sources}"
+    _remember_result(query, result)
+    return result

@@ -13,6 +13,15 @@ def _offline_context_tokens(monkeypatch):
     monkeypatch.setattr(research, "context_tokens", lambda: config.MODEL_CONTEXT_TOKENS)
 
 
+@pytest.fixture(autouse=True)
+def _clean_repeat_cache():
+    """O cache anti-loop é global ao módulo; sem limpar, um teste devolve o
+    resultado cacheado de outro."""
+    research._recent_calls.clear()
+    yield
+    research._recent_calls.clear()
+
+
 class TestGenerateQueries:
     def test_original_question_always_first(self):
         with patch("web_search_mcp.tools.research.chat", return_value="busca 1\nbusca 2"):
@@ -165,7 +174,7 @@ class TestResearchWeb:
     def test_no_results_message(self):
         with patch.object(research, "_collect_links", return_value=[]):
             result = research.research_web("pergunta sem resultado")
-        assert result == "Nenhum resultado encontrado."
+        assert result.startswith("Nenhum resultado encontrado.")
 
     def test_all_pages_failed_message(self):
         with patch.object(research, "_collect_links", return_value=[{"url": "http://a.com"}]), \
@@ -369,3 +378,52 @@ class TestExpandSeeds:
             "https://a.com/2026/08/24/a1-materia-um",
             "https://a.com/2026/08/24/a2-materia-dois",
         ]
+
+
+class TestRepeatGuard:
+    @pytest.fixture(autouse=True)
+    def _clean_cache(self):
+        research._recent_calls.clear()
+        yield
+        research._recent_calls.clear()
+
+    def test_exact_repeat_returns_cached_with_note(self):
+        research._remember_result("qual a build de força?", "RESULTADO ANTERIOR")
+        with patch.object(research, "_collect_links") as collect:
+            out = research.research_web("Qual a build de força?")
+        collect.assert_not_called()
+        assert out.startswith(research._REPEAT_NOTE)
+        assert "RESULTADO ANTERIOR" in out
+
+    def test_near_duplicate_hits_cache(self):
+        research._remember_result(
+            "melhor build de força no início de elden ring", "CACHEADO"
+        )
+        assert research._cached_result(
+            "melhor build de força no começo de Elden Ring"
+        ) == "CACHEADO"
+
+    def test_different_query_misses(self):
+        research._remember_result("cotação do dólar hoje", "X")
+        assert research._cached_result("previsão do tempo em Curitiba") is None
+
+    def test_expired_entry_ignored(self):
+        research._remember_result("pergunta", "VELHO")
+        key = research._repeat_key("pergunta")
+        ts, res = research._recent_calls[key]
+        research._recent_calls[key] = (ts - research._REPEAT_TTL_SECONDS - 1, res)
+        assert research._cached_result("pergunta") is None
+
+    def test_empty_result_also_cached(self):
+        with patch.object(research, "_collect_links", return_value=[]):
+            first = research.research_web("busca sem resultado nenhum xyz")
+        assert "Nenhum resultado" in first
+        with patch.object(research, "_collect_links") as collect:
+            second = research.research_web("busca sem resultado nenhum xyz")
+        collect.assert_not_called()
+        assert second.startswith(research._REPEAT_NOTE)
+
+    def test_cache_capped(self):
+        for i in range(research._REPEAT_MAX_ENTRIES + 10):
+            research._remember_result(f"pergunta numero {i} bem diferente {i*i}", "r")
+        assert len(research._recent_calls) <= research._REPEAT_MAX_ENTRIES
