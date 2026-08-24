@@ -41,18 +41,26 @@ _QUERIES_INSTRUCTION = (
 
 _BASE_INSTRUCTION = (
     "Você é um pesquisador web. Recebe uma pergunta e o material coletado "
-    "de várias páginas. Extraia APENAS os fatos que respondem à pergunta e "
-    "escreva um resumo curto e direto em português do Brasil, citando a URL "
-    "da fonte de cada fato e a data/hora do dado quando houver. Ignore "
-    "páginas irrelevantes ou que falharam. Nunca invente nada: se o "
-    "material não responder, diga exatamente o que faltou. Não copie o "
-    "conteúdo bruto das páginas. Se a pergunta pedir um panorama de "
-    "notícias do dia, priorize COBERTURA sobre profundidade: 12 ou mais "
-    "manchetes distintas, uma ou duas linhas cada, agrupadas por seção — "
-    "não gaste o espaço aprofundando poucos temas. Fontes em outros idiomas valem tanto "
-    "quanto as em português: traduza os fatos delas com fidelidade, "
-    "mantendo nomes próprios, siglas e termos técnicos na forma original "
-    "quando não houver tradução consagrada."
+    "de várias páginas, numerado em blocos FONTE [n]. Extraia APENAS os "
+    "fatos que respondem à pergunta e escreva um resumo curto e direto em "
+    "português do Brasil. Cada fato termina com a marcação [n] da fonte de "
+    "onde saiu, e a data/hora do dado quando houver — use o número, NUNCA "
+    "escreva o nome do veículo (a legenda número→URL é montada fora). "
+    "Nunca combine numa mesma afirmação informações de fontes diferentes: "
+    "se duas fontes contribuem, escreva duas frases, cada uma com sua "
+    "marcação. Copie nomes de pessoas, cargos e números exatamente como "
+    "estão na fonte, sem aproximar nem fundir. Capa de portal mistura "
+    "notícia do dia com reportagem antiga: só apresente como fato de hoje "
+    "o que o material datar de hoje. Ignore páginas irrelevantes ou que "
+    "falharam. Nunca invente nada: se o material não responder, diga "
+    "exatamente o que faltou. Não copie o conteúdo bruto das páginas. Se a "
+    "pergunta pedir um panorama de notícias do dia, priorize COBERTURA "
+    "sobre profundidade: 12 ou mais manchetes distintas, uma ou duas "
+    "linhas cada, agrupadas por seção — não gaste o espaço aprofundando "
+    "poucos temas. Fontes em outros idiomas valem tanto quanto as em "
+    "português: traduza os fatos delas com fidelidade, mantendo nomes "
+    "próprios, siglas e termos técnicos na forma original quando não "
+    "houver tradução consagrada."
 )
 
 _RECENT_INSTRUCTION = (
@@ -368,12 +376,16 @@ def _read_pages(candidates: list[dict]) -> list[tuple[dict, str, str]]:
 
 
 def _render_dossier(pages_read: list[tuple[dict, str, str]]) -> str:
+    # Numerar as fontes ([1], [2]...) dá ao resumo um jeito de citar sem
+    # escrever nome de veículo: o modelo aponta o número, e o código monta a
+    # legenda número→URL — atribuição verificável, nunca inventada.
     dossier = "\n\n".join(
-        f"Fonte: {r.get('title', '').strip()}\n"
+        f"===== FONTE [{i}] =====\n"
+        f"Título: {r.get('title', '').strip()}\n"
         f"URL: {url}\n"
         f"Resumo da busca: {r.get('content', '').strip()}\n"
         f"Conteúdo da página:\n{page}"
-        for r, url, page in pages_read
+        for i, (r, url, page) in enumerate(pages_read, 1)
     )
 
     # Rede de segurança, não o controle principal: quem segura o tamanho é o
@@ -467,11 +479,11 @@ def research_web(query: str, recent: bool = False) -> str:
             f"lidas com sucesso e podem ser abertas com read_url)"
         )
 
-    # A lista de URLs vai por código, não pelo resumo: o modelo ora cita a
-    # URL, ora troca pelo nome do veículo, ora omite (medido em 3 de 4
-    # execuções, ver refino.md). Aqui sabemos exatamente o que foi lido —
-    # e o _read_pages já garantiu que todas abriram.
-    sources = "\n".join(f"- {url}" for _, url, _ in pages_read)
+    # A legenda numerada vai por código, não pelo resumo: o modelo cita [n]
+    # e aqui sabemos exatamente qual URL é cada número — atribuição de fonte
+    # nunca é redigida pelo modelo. O _read_pages já garantiu que todas
+    # abriram, e a numeração segue a ordem dos blocos FONTE [n] do dossiê.
+    sources = "\n".join(f"[{i}] {url}" for i, (_, url, _) in enumerate(pages_read, 1))
 
     now = datetime.now().astimezone()
     utc_now = now.astimezone(timezone.utc)
