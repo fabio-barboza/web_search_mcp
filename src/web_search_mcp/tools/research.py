@@ -547,6 +547,24 @@ def _repeat_key(query: str) -> str:
     return " ".join(query.lower().split())
 
 
+# Janela de rajada para o match por conjunto de palavras. Reformulação em
+# loop chega em segundos e reordena as palavras (SequenceMatcher pune ordem:
+# medido 0.66-0.80 entre variantes do mesmo loop, abaixo do corte 0.8).
+# Jaccard ignora ordem e separa bem (loop 0.53-0.91, pergunta diferente
+# ≤0.24), mas confunde perguntas legítimas de mesma forma ("melhores armas
+# ato 1" vs "melhores armaduras ato 1") — por isso só vale dentro da janela
+# curta, onde pergunta nova de verdade quase nunca aparece.
+_REPEAT_BURST_SECONDS = 60
+_REPEAT_TOKEN_SIMILARITY = 0.5
+
+
+def _token_similarity(a: str, b: str) -> float:
+    ta, tb = set(re.findall(r"\w+", a)), set(re.findall(r"\w+", b))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
 def _cached_result(query: str) -> str | None:
     """Resultado recente de pergunta igual ou quase igual, se houver."""
     now = time.monotonic()
@@ -556,8 +574,13 @@ def _cached_result(query: str) -> str | None:
     hit = _recent_calls.get(key)
     if hit:
         return hit[1]
-    for k, (_, result) in _recent_calls.items():
+    for k, (ts, result) in _recent_calls.items():
         if SequenceMatcher(None, key, k).ratio() >= _REPEAT_SIMILARITY:
+            return result
+        if (
+            now - ts <= _REPEAT_BURST_SECONDS
+            and _token_similarity(key, k) >= _REPEAT_TOKEN_SIMILARITY
+        ):
             return result
     return None
 

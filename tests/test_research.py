@@ -414,6 +414,46 @@ class TestRepeatGuard:
         research._recent_calls[key] = (ts - research._REPEAT_TTL_SECONDS - 1, res)
         assert research._cached_result("pergunta") is None
 
+    def test_burst_reformulation_hits_cache(self):
+        # Queries reais do loop em produção: SequenceMatcher fica em
+        # 0.66-0.80 (abaixo do corte), mas o conjunto de palavras bate.
+        research._remember_result(
+            "Baldur's Gate 3 minmax spell list Invisibility + Disintegrate "
+            "Honor difficulty strategy",
+            "CACHEADO",
+        )
+        assert research._cached_result(
+            "Baldur's Gate 3 Invisibility Disintegrate combo Honor Mode "
+            "strategy guide"
+        ) == "CACHEADO"
+
+    def test_token_match_expires_after_burst_window(self):
+        research._remember_result(
+            "Baldur's Gate 3 minmax spell list Invisibility + Disintegrate "
+            "Honor difficulty strategy",
+            "CACHEADO",
+        )
+        key = research._repeat_key(
+            "baldur's gate 3 minmax spell list invisibility + disintegrate "
+            "honor difficulty strategy"
+        )
+        ts, res = research._recent_calls[key]
+        research._recent_calls[key] = (ts - research._REPEAT_BURST_SECONDS - 1, res)
+        assert research._cached_result(
+            "Baldur's Gate 3 Invisibility Disintegrate combo Honor Mode "
+            "strategy guide"
+        ) is None
+
+    def test_similar_shape_different_question_misses_in_burst(self):
+        research._remember_result(
+            "melhores itens para Gloomstalker Ranger em Baldur's Gate 3 Ato 3",
+            "X",
+        )
+        assert research._cached_result(
+            "Baldur's Gate 3 usar muitos scrolls de Minor Globe de "
+            "Invulnerability e Disintegrate no modo Honra"
+        ) is None
+
     def test_empty_result_also_cached(self):
         with patch.object(research, "_collect_links", return_value=[]):
             first = research.research_web("busca sem resultado nenhum xyz")
