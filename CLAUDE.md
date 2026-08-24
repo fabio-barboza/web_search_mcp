@@ -21,10 +21,14 @@ Tests need no SearXNG/LLM running. Evals and manual server runs do.
 
 ## Architecture
 
-MCP server (FastMCP) exposing two tools, `read_url` and `research_web`. The
-point of the whole project: `research_web` does its search/scrape/summarize
-pipeline in its **own** context (its own LLM call), and only a ~700-token
-summary crosses back to the calling agent — never the raw HTML/text.
+MCP server (FastMCP) exposing three tools: `read_url`, `research_web` and
+`analyze_urls`. The point of the whole project: `research_web` does its
+search/scrape/summarize pipeline in its **own** context (its own LLM call),
+and only a ~700-token summary crosses back to the calling agent — never the
+raw HTML/text. `analyze_urls` (`tools/analyze.py`) applies the same
+philosophy to user-supplied URLs: reads 1-8 pages, one LLM call with the
+user's request (summary/technical opinion/comparison), returns only the
+analysis; per-page char budget = dossier budget split across the URLs.
 
 Pipeline in `tools/research.py::research_web`:
 1. `_collect_links` — generates 3 search-query variants via LLM

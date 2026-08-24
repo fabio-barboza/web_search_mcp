@@ -26,7 +26,11 @@ _QUERIES_INSTRUCTION = (
     "com onde ela apareceria (github, linkedin, currículo, empresa). "
     "Se o assunto tiver boa cobertura internacional (tecnologia, ciência, "
     "notícia mundial), escreva UMA das buscas em inglês — as fontes "
-    "internacionais de referência costumam ter o material mais completo."
+    "internacionais de referência costumam ter o material mais completo. "
+    "Se a pergunta pedir um panorama das notícias do dia, dedique uma busca "
+    "só às manchetes gerais (ex.: 'principais manchetes Brasil hoje') e uma "
+    "em inglês às internacionais (ex.: 'top world news today') — sem elas o "
+    "resultado enviesa para a editoria que calhar de ranquear melhor."
 )
 
 _BASE_INSTRUCTION = (
@@ -69,7 +73,10 @@ def _generate_queries(question: str) -> list[str]:
     alguém não devolve o GitHub dele; "nome + github" devolve).
     """
     try:
-        content = chat(system=_QUERIES_INSTRUCTION, user=question)
+        # A data entra no system porque busca de notícia funciona melhor
+        # datada, e o modelo não tem como saber que dia é hoje sozinho.
+        today = datetime.now().astimezone().strftime("%d/%m/%Y")
+        content = chat(system=f"Data de hoje: {today}. {_QUERIES_INSTRUCTION}", user=question)
         variants = [
             line.strip(" -*\"'")
             for line in content.splitlines()

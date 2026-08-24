@@ -16,7 +16,7 @@ class TestTools:
                 return await client.list_tools()
 
         tools = _run(go())
-        assert {t.name for t in tools} == {"read_url", "research_web"}
+        assert {t.name for t in tools} == {"read_url", "research_web", "analyze_urls"}
 
 
 class TestPrompt:
