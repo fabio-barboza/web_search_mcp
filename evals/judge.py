@@ -54,11 +54,15 @@ def _judge_claim(claim: str, dossier: str) -> bool | None:
     return "NÃO" not in verdict.upper() and "SUPORTADA" in verdict.upper()
 
 
-def faithfulness(summary: str, dossier: str) -> tuple[float, int, int]:
+def faithfulness(summary: str, dossier: str, max_claims: int | None = None) -> tuple[float, int, int]:
     """Devolve (nota, suportadas, julgadas). Nota = suportadas / julgadas.
 
     Afirmações cujo julgamento falhou saem do denominador — a nota fala do
     que foi efetivamente medido.
+
+    max_claims limita quantas afirmações são julgadas (uma chamada de LLM
+    por afirmação): amostra as primeiras N em vez de julgar todas. Para
+    comparar rodadas basta a amostra; julgar tudo só muda o custo.
     """
     try:
         claims = _extract_claims(summary)
@@ -67,6 +71,8 @@ def faithfulness(summary: str, dossier: str) -> tuple[float, int, int]:
         return 0.0, 0, 0
     if not claims:
         return 0.0, 0, 0
+    if max_claims:
+        claims = claims[:max_claims]
 
     verdicts = [v for c in claims if (v := _judge_claim(c, dossier)) is not None]
     if not verdicts:

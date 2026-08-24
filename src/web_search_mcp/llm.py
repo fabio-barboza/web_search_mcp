@@ -8,7 +8,14 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
-def _resolve_model() -> str:
+def _list_models() -> list[dict]:
+    """GET /models do provider. Levanta em falha de rede/HTTP."""
+    resp = requests.get(f"{config.MODEL_BASE_URL}/models", timeout=config.MODEL_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json().get("data", [])
+
+
+def _resolve_model(items: list[dict] | None = None) -> str:
     """Devolve o nome do modelo a usar.
 
     MODEL preenchido no .env força um modelo específico, sem bater na rede.
@@ -26,13 +33,12 @@ def _resolve_model() -> str:
     if config.MODEL:
         return config.MODEL
 
-    try:
-        resp = requests.get(f"{config.MODEL_BASE_URL}/models", timeout=config.MODEL_TIMEOUT)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        logger.error("_resolve_model: falha ao consultar %s/models: %s", config.MODEL_BASE_URL, e)
-        raise
-    items = resp.json().get("data", [])
+    if items is None:
+        try:
+            items = _list_models()
+        except requests.RequestException as e:
+            logger.error("_resolve_model: falha ao consultar %s/models: %s", config.MODEL_BASE_URL, e)
+            raise
 
     loaded = []
     for item in items:
@@ -73,6 +79,45 @@ def _resolve_model() -> str:
         f"{config.MODEL_BASE_URL}/models (provider não expõe status de "
         "load, e há mais de um modelo na lista). Defina MODEL no .env."
     )
+
+
+def context_tokens() -> int:
+    """Janela de contexto (em tokens) do modelo em uso.
+
+    Routers tipo llama.cpp/llama-swap expõem em /models os args com que o
+    modelo subiu (status.args, incluindo --ctx-size). Quando esse dado
+    existe, ele vale mais que o MODEL_CONTEXT_TOKENS do .env: o valor do
+    .env é declarado à mão e dessincroniza quando o usuário troca de modelo
+    no router — para baixo desperdiça janela, para cima mata a chamada com
+    HTTP 400 depois de a busca e o scraping já terem sido pagos.
+
+    Nunca levanta: qualquer falha (provider sem status.args, rede fora)
+    cai no valor do .env. Sem cache, pela mesma razão do _resolve_model —
+    o modelo carregado pode mudar entre chamadas.
+    """
+    try:
+        items = _list_models()
+        model = _resolve_model(items)
+    except Exception as e:
+        logger.info("context_tokens: sem detecção via /models (%s); usando MODEL_CONTEXT_TOKENS=%d",
+                    e, config.MODEL_CONTEXT_TOKENS)
+        return config.MODEL_CONTEXT_TOKENS
+
+    for item in items:
+        if item.get("id") != model:
+            continue
+        status = item.get("status")
+        args = status.get("args") if isinstance(status, dict) else None
+        if isinstance(args, list) and "--ctx-size" in args:
+            try:
+                detected = int(args[args.index("--ctx-size") + 1])
+            except (IndexError, ValueError):
+                break
+            if detected > 0:
+                logger.info("context_tokens: detectado ctx-size=%d do modelo %s", detected, model)
+                return detected
+        break
+    return config.MODEL_CONTEXT_TOKENS
 
 
 def chat(system: str, user: str, temperature: float | None = None) -> str:

@@ -9,6 +9,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 from . import config
+from .tools.analyze import analyze_urls
 from .tools.read_url import read_url
 from .tools.research import research_web
 
@@ -20,12 +21,16 @@ mcp = FastMCP(
         "e UMA VEZ SÓ: ela já busca vários ângulos por dentro, então repetir "
         "a mesma pergunta reescrita relê as mesmas páginas e dobra o tempo "
         "de espera sem trazer material novo. "
-        "Use read_url quando o usuário fornecer um link "
-        "específico e pedir para lê-lo, resumi-lo ou analisá-lo."
+        "Use analyze_urls quando o usuário fornecer link(s) e pedir resumo, "
+        "parecer, opinião ou comparação: a leitura e a análise acontecem lá "
+        "dentro e só o resultado volta. "
+        "Use read_url apenas quando o texto integral da página for "
+        "necessário no seu contexto."
     ),
 )
 mcp.tool(read_url)
 mcp.tool(research_web)
+mcp.tool(analyze_urls)
 
 
 @mcp.prompt
