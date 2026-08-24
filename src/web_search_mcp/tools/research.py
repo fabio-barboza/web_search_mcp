@@ -572,7 +572,9 @@ def _remember_result(query: str, result: str) -> None:
 def research_web(query: str, recent: bool = False) -> str:
     """Pesquisa na web e devolve um resumo com fontes.
 
-    Use para qualquer informação que você não saiba com certeza. Passe a
+    Use para qualquer informação que você não saiba com certeza — e também
+    quando acha que sabe mas o assunto pode ter mudado desde o seu treino:
+    nesses casos, prefira pesquisar a responder de memória. Passe a
     pergunta completa em linguagem natural — a busca, a leitura das páginas
     e o resumo são feitos internamente.
 
@@ -581,7 +583,9 @@ def research_web(query: str, recent: bool = False) -> str:
     melhores páginas do conjunto. Chamar de novo com a mesma pergunta escrita
     de outro jeito não traz material novo: relê as mesmas páginas e gasta o
     mesmo tempo outra vez. Só chame outra vez quando a pergunta for
-    genuinamente outra, ou quando o resumo apontar o que faltou.
+    genuinamente outra, ou quando o resumo apontar o que faltou. Pergunta
+    NOVA do usuário = chamada nova, mesmo que seja sobre o mesmo assunto de
+    antes: cada pergunta diferente merece sua própria pesquisa.
 
     Args:
         query: A pergunta completa em linguagem natural, do jeito que o
