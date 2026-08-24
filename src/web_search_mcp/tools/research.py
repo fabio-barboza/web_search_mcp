@@ -1,9 +1,9 @@
 import logging
 import re
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import requests
@@ -602,7 +602,6 @@ def _summarize(query: str, dossier: str, recent: bool) -> str:
 # vem com ordem explícita de parada.
 _REPEAT_TTL_SECONDS = 600
 _REPEAT_MAX_ENTRIES = 50
-_REPEAT_SIMILARITY = 0.8
 _recent_calls: dict[str, tuple[float, str]] = {}
 
 _REPEAT_NOTE = (
@@ -613,31 +612,48 @@ _REPEAT_NOTE = (
     "abaixo, e se algo faltar, diga ao usuário o que faltou.\n\n"
 )
 
+# Palavras de função: mudam a frase sem mudar a pergunta. Lista de mecânica
+# de linguagem, não de assunto — vale para qualquer tema.
+_STOPWORDS = frozenset((
+    "a as o os um uma uns umas de do da dos das em no na nos nas por para "
+    "com sem sobre e ou que qual quais quanto quantos quando onde como "
+    "quem me meu minha seu sua ao aos à às pelo pela é são foi ser esta "
+    "este essa esse isso aquilo mais menos muito bem ja já entao então "
+    "the a an of in on at to for from by with about and or what which "
+    "who how when where is are was were be been do does did"
+.split()))
+
+
+def _content_tokens(query: str) -> frozenset[str]:
+    """Palavras que carregam o assunto: sem acento, sem pontuação, sem função.
+
+    A comparação é por CONJUNTO, então ordem e repetição não contam — é
+    exatamente a liberdade que uma reformulação usa.
+    """
+    folded = unicodedata.normalize("NFKD", query.lower())
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    return frozenset(t for t in re.findall(r"\w+", folded) if t not in _STOPWORDS)
+
 
 def _repeat_key(query: str) -> str:
     return " ".join(query.lower().split())
 
 
-# Janela de rajada para o match por conjunto de palavras. Reformulação em
-# loop chega em segundos e reordena as palavras (SequenceMatcher pune ordem:
-# medido 0.66-0.80 entre variantes do mesmo loop, abaixo do corte 0.8).
-# Jaccard ignora ordem e separa bem (loop 0.53-0.91, pergunta diferente
-# ≤0.24), mas confunde perguntas legítimas de mesma forma ("melhores armas
-# ato 1" vs "melhores armaduras ato 1") — por isso só vale dentro da janela
-# curta, onde pergunta nova de verdade quase nunca aparece.
-_REPEAT_BURST_SECONDS = 60
-_REPEAT_TOKEN_SIMILARITY = 0.5
-
-
-def _token_similarity(a: str, b: str) -> float:
-    ta, tb = set(re.findall(r"\w+", a)), set(re.findall(r"\w+", b))
-    if not ta or not tb:
-        return 0.0
-    return len(ta & tb) / len(ta | tb)
-
-
 def _cached_result(query: str) -> str | None:
-    """Resultado recente de pergunta igual ou quase igual, se houver."""
+    """Resultado recente da MESMA pergunta, se houver.
+
+    "Mesma" = mesmo conjunto de palavras de conteúdo. Reformular, reordenar
+    ou trocar palavra de função devolve o cache; trocar uma palavra de
+    conteúdo é outra pergunta e vai para a busca.
+
+    Similaridade de string não serve aqui, e a medição mostra por quê:
+    "principais notícias do Brasil hoje" x "principais notícias do mundo
+    hoje" dá 0.84 de SequenceMatcher — acima de qualquer corte que ainda
+    reconheça repetição real ("do Brasil" x "no Brasil" dá 0.97) — e as duas
+    perguntas são genuinamente diferentes. O erro é assimétrico: deixar de
+    barrar uma repetição custa uma busca; barrar pergunta nova devolve
+    resposta errada com cara de certa, calada.
+    """
     now = time.monotonic()
     for k in [k for k, (ts, _) in _recent_calls.items() if now - ts > _REPEAT_TTL_SECONDS]:
         del _recent_calls[k]
@@ -645,13 +661,11 @@ def _cached_result(query: str) -> str | None:
     hit = _recent_calls.get(key)
     if hit:
         return hit[1]
-    for k, (ts, result) in _recent_calls.items():
-        if SequenceMatcher(None, key, k).ratio() >= _REPEAT_SIMILARITY:
-            return result
-        if (
-            now - ts <= _REPEAT_BURST_SECONDS
-            and _token_similarity(key, k) >= _REPEAT_TOKEN_SIMILARITY
-        ):
+    tokens = _content_tokens(query)
+    if not tokens:
+        return None
+    for k, (_, result) in _recent_calls.items():
+        if _content_tokens(k) == tokens:
             return result
     return None
 

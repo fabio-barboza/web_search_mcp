@@ -395,13 +395,33 @@ class TestRepeatGuard:
         assert out.startswith(research._REPEAT_NOTE)
         assert "RESULTADO ANTERIOR" in out
 
-    def test_near_duplicate_hits_cache(self):
-        research._remember_result(
-            "melhor build de força no início de elden ring", "CACHEADO"
-        )
-        assert research._cached_result(
-            "melhor build de força no começo de Elden Ring"
-        ) == "CACHEADO"
+    def test_reformulation_hits_cache(self):
+        """Reordenar, acentuar ou trocar palavra de função é a MESMA pergunta."""
+        research._remember_result("qual a capital da Australia?", "CACHEADO")
+        assert research._cached_result("qual é a capital da Austrália?") == "CACHEADO"
+
+    def test_word_order_ignored(self):
+        research._remember_result("melhores itens Gloomstalker ato 3", "CACHEADO")
+        assert research._cached_result("ato 3 itens melhores Gloomstalker") == "CACHEADO"
+
+    def test_one_content_word_changed_is_another_question(self):
+        """Regressão: 'Brasil' x 'mundo' dá 0.84 de SequenceMatcher e vinha
+        sendo servido do cache — o segundo lado do panorama era descartado."""
+        research._remember_result("principais notícias do Brasil hoje", "CACHEADO")
+        assert research._cached_result("principais notícias do mundo hoje") is None
+
+    def test_function_word_changed_is_same_question(self):
+        research._remember_result("principais notícias do Brasil hoje", "CACHEADO")
+        assert research._cached_result("principais notícias no Brasil hoje") == "CACHEADO"
+
+    def test_sibling_questions_not_confused(self):
+        research._remember_result("melhores armas no ato 1", "CACHEADO")
+        assert research._cached_result("melhores armaduras no ato 1") is None
+        assert research._cached_result("melhores armas no ato 3") is None
+
+    def test_only_stopwords_never_matches(self):
+        research._remember_result("o que é isso", "CACHEADO")
+        assert research._cached_result("e o que foi") is None
 
     def test_different_query_misses(self):
         research._remember_result("cotação do dólar hoje", "X")
@@ -414,37 +434,7 @@ class TestRepeatGuard:
         research._recent_calls[key] = (ts - research._REPEAT_TTL_SECONDS - 1, res)
         assert research._cached_result("pergunta") is None
 
-    def test_burst_reformulation_hits_cache(self):
-        # Queries reais do loop em produção: SequenceMatcher fica em
-        # 0.66-0.80 (abaixo do corte), mas o conjunto de palavras bate.
-        research._remember_result(
-            "Baldur's Gate 3 minmax spell list Invisibility + Disintegrate "
-            "Honor difficulty strategy",
-            "CACHEADO",
-        )
-        assert research._cached_result(
-            "Baldur's Gate 3 Invisibility Disintegrate combo Honor Mode "
-            "strategy guide"
-        ) == "CACHEADO"
-
-    def test_token_match_expires_after_burst_window(self):
-        research._remember_result(
-            "Baldur's Gate 3 minmax spell list Invisibility + Disintegrate "
-            "Honor difficulty strategy",
-            "CACHEADO",
-        )
-        key = research._repeat_key(
-            "baldur's gate 3 minmax spell list invisibility + disintegrate "
-            "honor difficulty strategy"
-        )
-        ts, res = research._recent_calls[key]
-        research._recent_calls[key] = (ts - research._REPEAT_BURST_SECONDS - 1, res)
-        assert research._cached_result(
-            "Baldur's Gate 3 Invisibility Disintegrate combo Honor Mode "
-            "strategy guide"
-        ) is None
-
-    def test_similar_shape_different_question_misses_in_burst(self):
+    def test_different_question_same_shape_misses(self):
         research._remember_result(
             "melhores itens para Gloomstalker Ranger em Baldur's Gate 3 Ato 3",
             "X",
