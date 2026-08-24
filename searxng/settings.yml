@@ -308,6 +308,14 @@ hostnames:
     - '(.*\.)?scribd\.com$'
     - '(.*\.)?slideshare\.net$'
     - '(.*\.)?softonic\.com$'
+    # Agregadores de scrap/SEO que rankearam em teste real e poluíram o
+    # dossiê de notícias (conteúdo requentado, sem redação própria)
+    - '(.*\.)?the-world-now\.com$'
+    - '(.*\.)?worldlens\.live$'
+    - '(.*\.)?news24online\.com$'
+    - '(.*\.)?jagranjosh\.com$'
+    - '(.*\.)?einnews\.com$'
+    - '(.*\.)?msn\.com$'            # re-hospeda notícia; scraper só extrai casca
 
 enabled_plugins:
   - 'Hash plugin'

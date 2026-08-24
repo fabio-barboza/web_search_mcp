@@ -26,10 +26,10 @@ class TestGenerateQueries:
         lowered = [q.lower() for q in queries]
         assert len(lowered) == len(set(lowered))
 
-    def test_capped_at_four(self):
-        with patch("web_search_mcp.tools.research.chat", return_value="a\nb\nc\nd\ne"):
+    def test_capped_at_five(self):
+        with patch("web_search_mcp.tools.research.chat", return_value="a\nb\nc\nd\ne\nf"):
             queries = research._generate_queries("pergunta")
-        assert len(queries) <= 4
+        assert len(queries) <= 5
 
     def test_llm_exception_falls_back_to_question_only(self):
         with patch("web_search_mcp.tools.research.chat", side_effect=RuntimeError("boom")):
@@ -224,3 +224,27 @@ class TestMergeResults:
         urls = [r["url"] for r in research._merge_results(per_query)]
         assert urls[0] == "http://ok.com"
         assert len(urls) == 3
+
+
+class TestPanoramaSeeds:
+    def test_news_panorama_gets_br_and_world_seeds(self):
+        seeds = research._panorama_seeds(
+            "Faça um resumo das principais noticias no Brasil e no mundo hoje?", True
+        )
+        urls = [s["url"] for s in seeds]
+        assert "https://g1.globo.com/" in urls
+        assert "https://www.bbc.com/news" in urls
+
+    def test_br_only_panorama_skips_world_seeds(self):
+        seeds = research._panorama_seeds("principais notícias do dia", True)
+        urls = [s["url"] for s in seeds]
+        assert urls and all("bbc" not in u and "apnews" not in u for u in urls)
+
+    def test_topic_panorama_gets_no_seeds(self):
+        assert research._panorama_seeds("principais notícias de tecnologia hoje", True) == []
+
+    def test_non_recent_gets_no_seeds(self):
+        assert research._panorama_seeds("história das notícias no Brasil", False) == []
+
+    def test_non_news_question_gets_no_seeds(self):
+        assert research._panorama_seeds("qual a cotação do dólar hoje?", True) == []

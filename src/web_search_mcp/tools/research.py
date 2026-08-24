@@ -1,4 +1,5 @@
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -20,7 +21,9 @@ _RECENT_WINDOW = "day"
 _QUERIES_INSTRUCTION = (
     "Você planeja buscas web. Dada uma pergunta, escreva 3 buscas curtas e "
     "DIFERENTES entre si que, juntas, cobrem a resposta por ângulos "
-    "distintos. Uma busca por linha, sem numerar, sem explicar. Use os "
+    "distintos — 4 buscas quando a pergunta for ampla (panorama, 'Brasil e "
+    "mundo', comparação de várias coisas), porque ângulo que não vira busca "
+    "não aparece no resultado. Uma busca por linha, sem numerar, sem explicar. Use os "
     "termos que apareceriam na página procurada, não a pergunta inteira. "
     "Se a pergunta for sobre uma pessoa, inclua buscas que combinem o nome "
     "com onde ela apareceria (github, linkedin, currículo, empresa). "
@@ -29,8 +32,10 @@ _QUERIES_INSTRUCTION = (
     "internacionais de referência costumam ter o material mais completo. "
     "Se a pergunta pedir um panorama das notícias do dia, dedique uma busca "
     "só às manchetes gerais (ex.: 'principais manchetes Brasil hoje') e uma "
-    "em inglês às internacionais (ex.: 'top world news today') — sem elas o "
-    "resultado enviesa para a editoria que calhar de ranquear melhor."
+    "em inglês às internacionais NOMEANDO veículos de referência (ex.: "
+    "'world news today Reuters BBC AP') — sem o nome dos veículos a busca "
+    "em inglês devolve agregadores de SEO, e sem essas buscas o resultado "
+    "enviesa para a editoria que calhar de ranquear melhor."
 )
 
 _BASE_INSTRUCTION = (
@@ -40,7 +45,10 @@ _BASE_INSTRUCTION = (
     "da fonte de cada fato e a data/hora do dado quando houver. Ignore "
     "páginas irrelevantes ou que falharam. Nunca invente nada: se o "
     "material não responder, diga exatamente o que faltou. Não copie o "
-    "conteúdo bruto das páginas. Fontes em outros idiomas valem tanto "
+    "conteúdo bruto das páginas. Se a pergunta pedir um panorama de "
+    "notícias do dia, priorize COBERTURA sobre profundidade: 12 ou mais "
+    "manchetes distintas, uma ou duas linhas cada, agrupadas por seção — "
+    "não gaste o espaço aprofundando poucos temas. Fontes em outros idiomas valem tanto "
     "quanto as em português: traduza os fatos delas com fidelidade, "
     "mantendo nomes próprios, siglas e termos técnicos na forma original "
     "quando não houver tradução consagrada."
@@ -91,7 +99,11 @@ def _generate_queries(question: str) -> list[str]:
     for v in variants:
         if v.lower() not in {q.lower() for q in queries}:
             queries.append(v)
-    return queries[:4]
+    # 5 = original + 4 variantes (o teto de 4 cortava justamente a busca
+    # dedicada às manchetes internacionais em pergunta ampla — medido:
+    # panorama "Brasil e mundo" perdia a manchete do dia por falta de
+    # fan-out, não por leitura ruim das páginas).
+    return queries[:5]
 
 
 def _search_one(args: tuple[str, bool]) -> list[dict]:
@@ -113,6 +125,40 @@ def _search_one(args: tuple[str, bool]) -> list[dict]:
                 results.append(r)
                 seen.add(url)
     return results
+
+
+# Capas de veículos de referência, semeadas no topo dos candidatos quando a
+# pergunta pede panorama de notícias. Motor de busca não devolve capa para
+# "principais manchetes hoje" — devolve digest de SEO e agregador requentado
+# (medido: recall de 1/16 contra as manchetes do Google News). A capa é onde
+# as manchetes do dia realmente estão, e o _clean do scraper foi feito para
+# esse tipo de página. Fora do caso panorama, nada muda.
+_SEEDS_BR = [
+    "https://g1.globo.com/",
+    "https://noticias.uol.com.br/",
+    "https://www.cnnbrasil.com.br/",
+]
+_SEEDS_WORLD = [
+    "https://www.bbc.com/news",
+    "https://apnews.com/",
+]
+
+_NEWS_RE = re.compile(r"not[íi]cias?|manchetes?|headlines?|\bnews\b", re.I)
+_WORLD_RE = re.compile(r"mundo|internacion|world|global", re.I)
+# Panorama temático (tecnologia, games...) tem fontes próprias melhores que
+# capa de jornal generalista: nesses casos a busca normal resolve.
+_TOPIC_RE = re.compile(
+    r"tecnolog|ci[êe]nc|game|jogo|esport|econom|pol[íi]tic|sa[úu]de", re.I
+)
+
+
+def _panorama_seeds(query: str, recent: bool) -> list[dict]:
+    if not recent or not _NEWS_RE.search(query) or _TOPIC_RE.search(query):
+        return []
+    seeds = list(_SEEDS_BR)
+    if _WORLD_RE.search(query):
+        seeds += _SEEDS_WORLD
+    return [{"url": u, "title": "", "content": ""} for u in seeds]
 
 
 def _collect_links(query: str, recent: bool) -> list[dict]:
@@ -138,7 +184,13 @@ def _collect_links(query: str, recent: bool) -> list[dict]:
         per_query = []
     per_query.insert(0, original_results)
 
-    return _merge_results(per_query)
+    merged = _merge_results(per_query)
+
+    seeds = _panorama_seeds(query, recent)
+    if seeds:
+        seeded = {s["url"] for s in seeds}
+        merged = seeds + [r for r in merged if r.get("url") not in seeded]
+    return merged
 
 
 def _merge_results(per_query: list[list[dict]]) -> list[dict]:
