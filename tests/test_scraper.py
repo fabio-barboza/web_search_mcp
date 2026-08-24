@@ -110,3 +110,41 @@ class TestUnusable:
 
     def test_real_content_is_usable(self):
         assert not WebScraper.unusable("x" * 5000)
+
+
+class TestLinkDensity:
+    _INDEX = (
+        "<html><body><main>"
+        + "".join(f'<div><a href="/n{i}">Manchete número {i} sobre um assunto</a></div>' for i in range(40))
+        + "</main></body></html>"
+    )
+    _ARTICLE = (
+        "<html><body><main><h1>Título da matéria</h1>"
+        + "".join(f"<p>{'texto corrido de parágrafo real. ' * 20}</p>" for _ in range(10))
+        + '<p>Leia também <a href="/outra">esta outra matéria</a>.</p>'
+        + "</main></body></html>"
+    )
+
+    def test_index_page_has_high_density(self):
+        assert WebScraper.link_density(self._INDEX) >= 0.65
+
+    def test_article_has_low_density(self):
+        assert WebScraper.link_density(self._ARTICLE) < 0.65
+
+    def test_broken_html_returns_zero(self):
+        assert WebScraper.link_density("") == 0.0
+
+    def test_reject_index_discards_only_when_asked(self):
+        sc = WebScraper()
+        assert sc._extract(self._INDEX, reject_index=True).startswith("(página de índice")
+        assert not sc._extract(self._INDEX, reject_index=False).startswith("(página de índice")
+
+    def test_rejected_index_counts_as_unusable(self):
+        sc = WebScraper()
+        assert WebScraper.unusable(sc._extract(self._INDEX, reject_index=True))
+
+    def test_article_survives_reject_index(self):
+        sc = WebScraper()
+        out = sc._extract(self._ARTICLE, reject_index=True)
+        assert not WebScraper.failed(out)
+        assert "parágrafo real" in out

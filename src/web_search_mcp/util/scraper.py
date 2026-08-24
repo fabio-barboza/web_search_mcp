@@ -41,7 +41,19 @@ _FAILURE_NOTICES = (
     "(URL bloqueada por segurança)",
     "(não foi possível ler a página",
     "(sem conteúdo extraível)",
+    "(página de índice: só links, sem conteúdo próprio)",
 )
+
+# Fração do texto que está dentro de <a> acima da qual a página é um índice
+# (capa de portal, página de tópico, hub de links) e não conteúdo próprio.
+#
+# Medido: folha-topicos/inteligencia-artificial 0.98, capa da CNN Brasil 0.73;
+# do outro lado, wiki de classe do BG3 0.39, fextralife 0.35, Wikipédia 0.30,
+# página de item do bg3.wiki 0.24, matéria do g1 0.02. O corte em 0.65 fica no
+# meio do vão, sem encostar na página de item — que é lista de atributos, tem
+# a MESMA cara de índice pelo tamanho das linhas, e é justamente o que uma
+# pergunta sobre equipamento precisa ler.
+_MAX_LINK_DENSITY = 0.65
 
 # Abaixo disto a página não tem o que aproveitar, mesmo tendo devolvido 200 e
 # algum texto: é tela de login, muro de cookie, "ative o JavaScript" ou casca
@@ -113,7 +125,7 @@ class WebScraper:
         self.limit = limit
         self.timeout = timeout
 
-    def read_many(self, urls: list[str]) -> list[str]:
+    def read_many(self, urls: list[str], reject_index: bool = False) -> list[str]:
         """Lê várias URLs: download em paralelo, extração serial.
 
         Só o download é paralelizado. A extração roda no thread principal
@@ -126,11 +138,42 @@ class WebScraper:
             return []
         with ThreadPoolExecutor(max_workers=len(urls)) as pool:
             downloaded = list(pool.map(self._download, urls))
-        return [self._extract(html) if ok else html for ok, html in downloaded]
+        return [
+            self._extract(html, reject_index) if ok else html
+            for ok, html in downloaded
+        ]
 
     def read(self, url: str) -> str:
         """Lê uma única URL."""
         return self.read_many([url])[0]
+
+    @staticmethod
+    def link_density(html: str) -> float:
+        """Fração do texto da página que está dentro de links.
+
+        Índice (capa, página de tópico) é quase só âncora; conteúdo próprio
+        tem texto que não é link. Mede depois da poda de casca, senão o menu
+        de navegação sozinho já joga qualquer página para cima.
+        """
+        try:
+            root = lxml.html.fromstring(html)
+        except (lxml.etree.ParserError, ValueError):
+            return 0.0
+        _remove(root, root.xpath(_XPATH_TAGS))
+        total_all = max(len(root.text_content()), 1)
+        _remove(root, [
+            el for el in root.iter()
+            if _is_chrome(el) and len(el.text_content()) < total_all * _MAX_CHROME_SHARE
+        ])
+        body = root
+        for xp in ("//main", "//article"):
+            found = root.xpath(xp)
+            if found and len(found[0].text_content()) > 400:
+                body = found[0]
+                break
+        total = max(len(" ".join(body.text_content().split())), 1)
+        anchor = sum(len(" ".join(a.text_content().split())) for a in body.xpath(".//a"))
+        return anchor / total
 
     @staticmethod
     def failed(text: str) -> bool:
@@ -168,7 +211,14 @@ class WebScraper:
             return False, f"(não foi possível ler a página: {e})"
         return True, resp.text
 
-    def _extract(self, html: str) -> str:
+    def _extract(self, html: str, reject_index: bool = False) -> str:
+        # Índice não responde pergunta: o modelo lê manchete solta e serve
+        # chamada de capa como se fosse fato apurado, tudo sob uma fonte só.
+        # Só o research fora do panorama rejeita — o panorama LÊ capa de
+        # propósito, e o read_url/analyze_urls devolve a página que pediram.
+        if reject_index and self.link_density(html) >= _MAX_LINK_DENSITY:
+            return "(página de índice: só links, sem conteúdo próprio)"
+
         # trafilatura isola o conteúdo principal (sem menu/nav/rodapé/scripts).
         # favor_recall: páginas de dados (clima, cotação) põem o número em
         # widgets curtos, que o modo preciso descarta como boilerplate.

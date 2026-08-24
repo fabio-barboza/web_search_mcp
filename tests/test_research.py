@@ -67,7 +67,7 @@ class TestReadPages:
 
         call_count = {"n": 0}
 
-        def fake_read_many(urls):
+        def fake_read_many(urls, reject_index=False):
             call_count["n"] += 1
             # primeira onda: primeiro link falha, resto tem sucesso
             out = []
@@ -95,7 +95,7 @@ class TestReadPages:
         with patch.object(research._scraper, "read_many", return_value=None) as m, \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 5), \
              patch.object(config, "RESEARCH_MAX_WAVES", 2):
-            m.side_effect = lambda urls: ["(sem conteúdo extraível)" for _ in urls]
+            m.side_effect = lambda urls, reject_index=False: ["(sem conteúdo extraível)" for _ in urls]
             pages = research._read_pages(candidates)
 
         assert m.call_count == 2
@@ -106,7 +106,7 @@ class TestReadPages:
 
         # 12288 tokens úteis * _CHARS_PER_TOKEN = orçamento em caracteres.
         # Páginas de 12000 + cabeçalho (~79): duas cabem, a terceira não.
-        with patch.object(research._scraper, "read_many", side_effect=lambda urls: ["c" * 12000 for _ in urls]), \
+        with patch.object(research._scraper, "read_many", side_effect=lambda urls, reject_index=False: ["c" * 12000 for _ in urls]), \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 10), \
              patch.object(config, "RESEARCH_MAX_WAVES", 4), \
              patch.object(config, "MODEL_CONTEXT_TOKENS", 16384), \
@@ -119,7 +119,7 @@ class TestReadPages:
     def test_first_page_enters_even_if_over_budget(self):
         """Uma página sozinha maior que a janela ainda é melhor que nada: ela
         entra e o _render_dossier corta o excesso."""
-        with patch.object(research._scraper, "read_many", side_effect=lambda urls: ["c" * 500000 for _ in urls]), \
+        with patch.object(research._scraper, "read_many", side_effect=lambda urls, reject_index=False: ["c" * 500000 for _ in urls]), \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 3), \
              patch.object(config, "RESEARCH_MAX_WAVES", 1), \
              patch.object(config, "MODEL_CONTEXT_TOKENS", 16384), \
@@ -467,3 +467,97 @@ class TestRepeatGuard:
         for i in range(research._REPEAT_MAX_ENTRIES + 10):
             research._remember_result(f"pergunta numero {i} bem diferente {i*i}", "r")
         assert len(research._recent_calls) <= research._REPEAT_MAX_ENTRIES
+
+
+class TestSuspiciousUrl:
+    def test_injected_markup_payload_rejected(self):
+        # Caso real visto em produção: injeção de SEO num domínio legítimo.
+        url = (
+            "https://geohereditas.igc.usp.br/passeio-virtual-anavilhanas/"
+            "?xml=data:gsf,%3Ckrpano%3E%3Cinclude%20url%3D%22//yapuza.xyz/q/1%22/%3E%3C/krpano%3E"
+        )
+        assert research._is_suspicious_url(url)
+
+    def test_normal_urls_pass(self):
+        for url in (
+            "https://g1.globo.com/economia/noticia/2026/08/24/braskem.ghtml",
+            "https://bg3.wiki/wiki/Gontr_Mael",
+            "https://www.reddit.com/r/BG3Builds/comments/1ikpnwg/gear/?tl=pt-br",
+            "https://example.com/busca?q=data+science&page=2",
+        ):
+            assert not research._is_suspicious_url(url), url
+
+    def test_filtered_out_of_merge(self):
+        bad = "https://ok.com/x?xml=data:gsf,%3Cscript%3E"
+        per_query = [[{"url": bad, "score": 9}, {"url": "https://ok.com/boa"}]]
+        urls = [r["url"] for r in research._merge_results(per_query)]
+        assert bad not in urls
+        assert "https://ok.com/boa" in urls
+
+
+class TestRejectIndex:
+    def test_panorama_reads_index_pages(self):
+        """Panorama lê capa de propósito: não pode rejeitar índice."""
+        seen = {}
+
+        def fake_read_many(urls, reject_index=False):
+            seen["reject_index"] = reject_index
+            return ["conteúdo " + "x" * 2000 for _ in urls]
+
+        with patch.object(research._scraper, "read_many", side_effect=fake_read_many), \
+             patch("web_search_mcp.tools.research._collect_links",
+                   return_value=[{"url": "https://g1.globo.com/"}]), \
+             patch("web_search_mcp.tools.research._summarize", return_value="resumo"):
+            research.research_web("principais notícias do Brasil e do mundo hoje", recent=True)
+
+        assert seen["reject_index"] is False
+
+    def test_normal_question_rejects_index_pages(self):
+        seen = {}
+
+        def fake_read_many(urls, reject_index=False):
+            seen["reject_index"] = reject_index
+            return ["conteúdo " + "x" * 2000 for _ in urls]
+
+        with patch.object(research._scraper, "read_many", side_effect=fake_read_many), \
+             patch("web_search_mcp.tools.research._collect_links",
+                   return_value=[{"url": "https://bg3.wiki/wiki/Gontr_Mael"}]), \
+             patch("web_search_mcp.tools.research._summarize", return_value="resumo"):
+            research.research_web("melhores itens para Gloomstalker no ato 3")
+
+        assert seen["reject_index"] is True
+
+
+class TestHubPage:
+    _MENU = "\n".join(f"Seção {i}" for i in range(60))
+    _PROSA = "\n".join("frase longa de conteúdo real. " * 10 for _ in range(8))
+
+    def test_section_index_is_hub(self):
+        assert research._is_hub_page("https://www.cnnbrasil.com.br/tecnologia/", self._MENU)
+
+    def test_front_page_is_hub(self):
+        assert research._is_hub_page("https://www.cnnbrasil.com.br/", self._MENU)
+
+    def test_deep_path_never_hub(self):
+        # Página de item de wiki: tabela de atributos, sem prosa, mas é
+        # exatamente o conteúdo que uma pergunta sobre equipamento precisa.
+        assert not research._is_hub_page("https://bg3.wiki/wiki/Gontr_Mael", self._MENU)
+
+    def test_shallow_path_with_prose_passes(self):
+        # Lista de itens de wiki na raiz do domínio (fextralife.com/Rings).
+        assert not research._is_hub_page("https://x.wiki.fextralife.com/Rings", self._PROSA)
+
+    def test_short_page_on_shallow_path_passes(self):
+        # Post curto publicado na raiz: poucas linhas, não é vitrine.
+        assert not research._is_hub_page("https://blog.com/meu-post", "linha\nlinha\nlinha")
+
+    def test_hub_discarded_only_when_reject_index(self):
+        candidates = [{"url": "https://portal.com/tecnologia/"}]
+        page = self._MENU + "\n" + "x" * 1000
+
+        with patch.object(research._scraper, "read_many",
+                          side_effect=lambda urls, reject_index=False: [page]), \
+             patch.object(config, "RESEARCH_PAGE_BUDGET", 3), \
+             patch.object(config, "RESEARCH_MAX_WAVES", 1):
+            assert research._read_pages(candidates, reject_index=True) == []
+            assert len(research._read_pages(candidates, reject_index=False)) == 1

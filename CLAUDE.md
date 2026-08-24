@@ -2,6 +2,51 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## MANDATORY: this is a general-purpose web search tool
+
+`research_web` is a **generic** pipeline: the model decides it needs a fact,
+the tool searches, opens URLs, reads them, summarizes, and returns the
+summary to the calling agent. Nothing about it is supposed to know what the
+question is *about*.
+
+When a bad result is reported, the example is always just an example. A
+question about a game, about today's headlines, about a library's API — all
+of them are the same request wearing different clothes. **Never fix the
+example.** Ask what generic property of the pipeline failed (search quality,
+page selection, extraction, budget, attribution) and fix that.
+
+FORBIDDEN, without exception:
+
+- Adding a topic, domain, product, or vertical to any prompt
+  (`_QUERIES_INSTRUCTION`, `_BASE_INSTRUCTION`, tool docstrings, MCP
+  `instructions`, the `pesquisador` prompt). No "for games…", "for news…",
+  "for AI models…", no naming outlets, sites, or franchises.
+- Branching the pipeline on what the question is about — regexes over the
+  query text that detect a subject, per-subject page budgets, per-subject
+  seed URLs.
+- Tuning any threshold so that one reported example passes.
+
+ALLOWED, and the right shape of a fix:
+
+- Structural signals that hold for any page in any language: link density,
+  path depth, prose ratio, text length, HTTP status, URL well-formedness.
+- Search-infrastructure work (SearXNG engines, ranking, dedupe, domain caps).
+- Budget, concurrency, caching, and error handling.
+- Comments citing the pages a threshold was measured against — measurement
+  evidence is documentation, not a topic dependency. Whether code is generic
+  is decided by what it *branches on*, never by what its comments mention.
+
+Test any new heuristic against a corpus spanning unrelated subjects and
+BOTH outcomes (pages it must reject AND pages it must keep), and record the
+numbers in a comment. A rule validated on one subject is not validated.
+
+Known debt against this rule: the news-panorama path (`_SEEDS_BR`,
+`_SEEDS_WORLD`, `_NEWS_RE`, `_panorama_seeds`, `_expand_seeds`,
+`RESEARCH_PANORAMA_PAGES`, and the panorama sentences inside
+`_QUERIES_INSTRUCTION`/`_BASE_INSTRUCTION`) is subject-specific and
+pre-dates this rule. Do not extend it, do not copy its shape for another
+subject.
+
 ## Commands
 
 ```bash

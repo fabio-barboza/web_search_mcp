@@ -4,7 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -121,6 +121,24 @@ def _generate_queries(question: str) -> list[str]:
 # URL — sem removê-los, a mesma matéria vinda de duas buscas conta como duas
 # URLs diferentes e o sinal de concordância se perde.
 _TRACKING_KEYS = {"fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "ref", "src"}
+
+
+# Marcas de payload injetado no parâmetro de query. Visto em produção: uma
+# página da USP entrou na lista de fontes com
+# "?xml=data:gsf,<krpano><include url="//yapuza.xyz/..."/></krpano>" —
+# injeção de SEO num domínio legítimo. Nada disso aparece em URL de conteúdo
+# real, e citar uma dessas como fonte é pior que ter uma fonte a menos.
+_URL_PAYLOAD_MARKS = ("<", ">", "data:", "javascript:", "\\x3c", "%3c")
+
+
+def _is_suspicious_url(url: str) -> bool:
+    """True quando a query string carrega marcação ou outro esquema embutido."""
+    try:
+        query = urlsplit(url).query
+    except ValueError:
+        return True
+    decoded = unquote(query).lower()
+    return any(m in decoded for m in _URL_PAYLOAD_MARKS)
 
 
 def _normalize_url(url: str) -> str:
@@ -354,6 +372,11 @@ def _merge_results(per_query: list[list[dict]]) -> list[dict]:
     Desempate por concordância primeiro: um resultado achado por duas buscas
     diferentes vale mais que um com score alto numa busca só.
     """
+    per_query = [
+        [r for r in results if not _is_suspicious_url(r.get("url", ""))]
+        for results in per_query
+    ]
+
     agreement: dict[str, int] = {}
     for results in per_query:
         for key in {_normalize_url(r["url"]) for r in results if r.get("url")}:
@@ -414,8 +437,40 @@ def _dossier_char_budget() -> int:
     return max(int(usable * _CHARS_PER_TOKEN), 0)
 
 
+# Página-hub (capa, seção de portal) que a densidade de links do scraper não
+# pega: o que sobra da extração é menu e manchete solta, texto que não está
+# dentro de <a> e por isso não conta como link. Assinatura combinada, medida
+# no corpus real: caminho raso (cnnbrasil.com.br/tecnologia/), nenhuma prosa
+# de verdade e muitas linhas.
+#
+# Os três juntos são necessários. Sozinho, o caminho raso derruba
+# fextralife.com/Rings e eldenring.wiki/Weapons — lista de itens é o que uma
+# pergunta sobre equipamento precisa ler. Sozinha, a falta de prosa derruba a
+# página de item do bg3.wiki, que é tabela de atributos. E o piso de linhas
+# protege o post curto de blog publicado na raiz do domínio.
+_HUB_MAX_PATH_SEGMENTS = 1
+_HUB_MAX_PROSE_LINES = 3
+_HUB_MIN_LINES = 30
+_PROSE_LINE_CHARS = 200
+
+
+def _is_hub_page(url: str, text: str) -> bool:
+    """True quando a página é vitrine de links de outras páginas."""
+    try:
+        segments = [s for s in urlsplit(url).path.split("/") if s]
+    except ValueError:
+        return False
+    if len(segments) > _HUB_MAX_PATH_SEGMENTS:
+        return False
+    lines = [l for l in text.splitlines() if l.strip()]
+    prose = sum(1 for l in lines if len(l.strip()) >= _PROSE_LINE_CHARS)
+    return len(lines) >= _HUB_MIN_LINES and prose <= _HUB_MAX_PROSE_LINES
+
+
 def _read_pages(
-    candidates: list[dict], page_budget: int | None = None
+    candidates: list[dict],
+    page_budget: int | None = None,
+    reject_index: bool = False,
 ) -> list[tuple[dict, str, str]]:
     """Lê candidatos em ondas até juntar RESEARCH_PAGE_BUDGET páginas boas.
 
@@ -445,12 +500,19 @@ def _read_pages(
             break
         remaining = budget - len(pages_read)
         batch, queue = queue[:remaining], queue[remaining:]
-        pages = _scraper.read_many([u for _, u in batch])
+        pages = _scraper.read_many([u for _, u in batch], reject_index=reject_index)
         for (r, url), page in zip(batch, pages):
             if WebScraper.unusable(page):
                 logger.error(
                     "_read_pages: onda %d, descartada url=%s (%d chars) motivo=%s",
                     wave + 1, url, len(page), page[:120],
+                )
+                continue
+            if reject_index and _is_hub_page(url, page):
+                logger.info(
+                    "_read_pages: onda %d, descartada url=%s: página-hub "
+                    "(vitrine de links, sem conteúdo próprio)",
+                    wave + 1, url,
                 )
                 continue
             # _render_dossier põe cabeçalho (título, URL, resumo da busca)
@@ -499,7 +561,16 @@ def _build_dossier(query: str, recent: bool) -> tuple[str, list[tuple[dict, str,
     """Busca, lê e monta o dossiê. Separado de _summarize para o eval
     conseguir o dossiê sem repesquisar."""
     results = _collect_links(query, recent)
-    pages_read = _read_pages(results, _page_budget(query, recent)) if results else []
+    panorama = bool(_panorama_seeds(query, recent))
+    pages_read = (
+        _read_pages(
+            results,
+            config.RESEARCH_PANORAMA_PAGES if panorama else None,
+            reject_index=not panorama,
+        )
+        if results
+        else []
+    )
     return _render_dossier(pages_read), pages_read
 
 
@@ -644,7 +715,12 @@ def research_web(query: str, recent: bool = False) -> str:
         _remember_result(query, outcome)
         return outcome
 
-    pages_read = _read_pages(results, _page_budget(query, recent))
+    panorama = bool(_panorama_seeds(query, recent))
+    pages_read = _read_pages(
+        results,
+        config.RESEARCH_PANORAMA_PAGES if panorama else None,
+        reject_index=not panorama,
+    )
     if not pages_read:
         logger.error("research_web: todas as %d páginas candidatas falharam para query=%r", len(results), query)
         outcome = "Nenhuma das páginas encontradas pôde ser lida."
