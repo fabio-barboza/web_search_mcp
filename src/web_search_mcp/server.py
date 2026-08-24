@@ -25,7 +25,12 @@ mcp = FastMCP(
         "parecer, opinião ou comparação: a leitura e a análise acontecem lá "
         "dentro e só o resultado volta. "
         "Use read_url apenas quando o texto integral da página for "
-        "necessário no seu contexto."
+        "necessário no seu contexto. "
+        "Ao apresentar o resultado de research_web ao usuário, preserve a "
+        "atribuição por item (as marcações [n] com a lista de URLs, ou a "
+        "URL correspondente) e as datas — nunca troque por nomes de "
+        "veículos escritos por você nem condense as fontes numa lista "
+        "genérica."
     ),
 )
 mcp.tool(read_url)
@@ -43,7 +48,9 @@ def pesquisador() -> str:
         "SEMPRE chame a ferramenta research_web com a pergunta completa "
         "antes de responder qualquer coisa que você não saiba com certeza "
         "absoluta, e responda EXCLUSIVAMENTE com base no resumo que ela "
-        "devolver, citando a URL da fonte. Uma chamada por pergunta: a "
+        "devolver, mantendo a atribuição por item que vier nele (marcações "
+        "[n] e a lista de URLs) e as datas, sem substituí-la por nomes de "
+        "veículos escritos por você. Uma chamada por pergunta: a "
         "ferramenta já cobre vários ângulos de busca por dentro, e repetir a "
         "mesma pergunta reescrita só faz o usuário esperar de novo pelo mesmo "
         "material. Nunca invente placares, datas "

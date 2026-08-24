@@ -485,6 +485,19 @@ def research_web(query: str, recent: bool = False) -> str:
     # abriram, e a numeração segue a ordem dos blocos FONTE [n] do dossiê.
     sources = "\n".join(f"[{i}] {url}" for i, (_, url, _) in enumerate(pages_read, 1))
 
+    # O agente que consome a tool tende a reescrever o resumo e, nisso,
+    # apagar as marcações [n] e trocar a atribuição por uma lista genérica
+    # de veículos redigida por ele (observado no Open WebUI: datas sumiram e
+    # um erro novo entrou na reescrita). A nota abaixo é endereçada a esse
+    # agente — é a única camada onde dá para defender a atribuição.
+    relay_note = (
+        "Nota para o agente: cada [n] do resumo aponta para a URL de mesmo "
+        "número na lista abaixo. Ao apresentar ao usuário, mantenha a "
+        "atribuição POR ITEM (o [n] ou a URL correspondente) e as datas. "
+        "Não substitua por nomes de veículos nem condense as fontes numa "
+        "lista genérica no rodapé."
+    )
+
     now = datetime.now().astimezone()
     utc_now = now.astimezone(timezone.utc)
     stamp = (
@@ -492,4 +505,4 @@ def research_web(query: str, recent: bool = False) -> str:
         f"({utc_now.strftime('%H:%M')} UTC)."
     )
     logger.info("research_web ok: query=%r páginas_lidas=%d", query, len(pages_read))
-    return f"{stamp}\n\n{summary}\n\nURLs consultadas:\n{sources}"
+    return f"{stamp}\n\n{summary}\n\n{relay_note}\n\nURLs consultadas:\n{sources}"
