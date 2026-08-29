@@ -27,13 +27,14 @@ mcp = FastMCP(
         "Use read_url apenas quando o texto integral de UMA página for "
         "necessário no seu contexto: para várias páginas, analyze_urls faz "
         "a leitura toda de uma vez e devolve só o resultado, enquanto "
-        "encadear read_url enche seu contexto e perde a atribuição por "
-        "item. "
-        "Ao apresentar o resultado de research_web ao usuário, preserve a "
-        "atribuição por item (as marcações [n] com a lista de URLs, ou a "
-        "URL correspondente) e as datas — nunca troque por nomes de "
-        "veículos escritos por você nem condense as fontes numa lista "
-        "genérica."
+        "encadear read_url enche seu contexto à toa. "
+        "Ao apresentar qualquer resultado ao usuário, preserve a atribuição "
+        "por item: o link markdown que veio junto do fato (research_web e "
+        "analyze_urls) ou o link do cabeçalho \"Fonte desta página\" "
+        "(read_url), mais as datas. Nunca troque um link por nome de página "
+        "ou de veículo escrito por você, nem condense as fontes numa lista "
+        "genérica no rodapé: nome sem endereço é fonte que o usuário não "
+        "consegue conferir."
     ),
 )
 mcp.tool(read_url)

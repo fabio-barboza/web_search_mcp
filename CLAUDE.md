@@ -73,7 +73,15 @@ code from the page that was actually read (`_label_citations`). A marker
 with no link must not exist: a number the model invented for a source that
 is not in the list is deleted from the summary, not left dangling.
 
-This holds for anything the tool returns, now and later. If a future format
+This holds for every tool, not just `research_web`. `read_url` returns raw
+text, so there is nothing in the material for the model to preserve — it
+prefixes a `Fonte desta página` header with a ready markdown link
+(`_source_header`, built from the URL actually delivered). Observed on
+2026-08-29, before that header existed: an answer built from 21 `read_url`
+calls cited "ACL policy examples - Tailscale Docs", a page name with no
+address anywhere. That was not disobedience; there was no link to keep.
+
+This holds for anything the tools return, now and later. If a future format
 change makes attribution depend on a separate block again, it is wrong.
 
 ## MANDATORY: quem lê uma página tem que saber qual página leu
