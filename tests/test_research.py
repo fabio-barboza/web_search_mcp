@@ -559,3 +559,82 @@ class TestLabelCitations:
 
     def test_no_pages_strips_everything(self):
         assert research._label_citations("Alegação [1] solta [2].", []) == "Alegação solta."
+
+
+class TestSearchHealthNote:
+    """Aviso de infraestrutura: só quando os motores mortos são maioria.
+
+    Sem constante mágica — a comparação é contra os motores que de fato
+    responderam naquela busca, então o aviso se ajusta sozinho a qualquer
+    instância do SearXNG, com 3 ou com 30 motores.
+    """
+
+    def _results(self, *engines_per_result):
+        return [{"url": f"http://x.com/{i}", "engines": list(e)}
+                for i, e in enumerate(engines_per_result)]
+
+    def test_maioria_morta_avisa(self):
+        down = {f"e{i}": "Suspended: CAPTCHA" for i in range(10)}
+        with patch.object(research._search, "health", return_value=down):
+            note = research._search_health_note(self._results(["bing"], ["bing"]))
+        assert "AVISO DE INFRAESTRUTURA" in note
+        assert "10 motores" in note
+        assert "respondeu apenas: bing" in note
+        # o ponto do aviso: cortar a re-chamada em círculo
+        assert "NÃO vai melhorar" in note
+
+    def test_degradacao_menor_nao_avisa(self):
+        down = {"yahoo": "HTTP protocol error"}
+        results = self._results(["bing"], ["duckduckgo"], ["brave", "qwant"])
+        with patch.object(research._search, "health", return_value=down):
+            assert research._search_health_note(results) == ""
+
+    def test_tudo_saudavel_nao_avisa(self):
+        with patch.object(research._search, "health", return_value={}):
+            assert research._search_health_note(self._results(["bing"])) == ""
+
+    def test_zero_resultados_com_motores_mortos_avisa(self):
+        down = {"a": "", "b": ""}
+        with patch.object(research._search, "health", return_value=down):
+            assert "AVISO DE INFRAESTRUTURA" in research._search_health_note([])
+
+
+class TestFunctionWordsAreNotSubject:
+    """Palavra de função não pode servir de prova de que a página é do tema.
+
+    Corpus de assuntos não relacionados, nos DOIS desfechos: o token de
+    função some, o token de assunto fica.
+    """
+
+    @pytest.mark.parametrize("query,esperado_fora", [
+        ("Tem como limitar as portas de um usuário no tailscale?", "tem"),
+        ("Você pode me dizer quem venceu a corrida de ontem?", "pode"),
+        ("Não sei se ele deve tomar a segunda dose da vacina", "deve"),
+        ("Can I have a refund for this order?", "have"),
+        ("Vamos precisar de mais memória para rodar o modelo?", "vamos"),
+    ])
+    def test_funcao_sai(self, query, esperado_fora):
+        assert esperado_fora not in research._content_tokens(query)
+
+    @pytest.mark.parametrize("query,esperado_dentro", [
+        ("Tem como limitar as portas de um usuário no tailscale?", "tailscale"),
+        ("Você pode me dizer quem venceu a corrida de ontem?", "corrida"),
+        ("Não sei se ele deve tomar a segunda dose da vacina", "vacina"),
+        ("Can I have a refund for this order?", "refund"),
+        ("Vamos precisar de mais memória para rodar o modelo?", "memoria"),
+    ])
+    def test_assunto_fica(self, query, esperado_dentro):
+        assert esperado_dentro in research._content_tokens(query)
+
+    def test_gramatica_deixa_de_casar_com_pergunta_de_rede(self):
+        q = research._content_tokens(
+            "Tem como adicionar um usuário no tailscale mas limitar as portas?"
+        )
+        gramatica = research._content_tokens(
+            "Tem ou têm? Qual é o certo? - Português"
+        )
+        doc = research._content_tokens(
+            "Tailscale ACL: restrict ports per user - policy file"
+        )
+        assert not (q & gramatica)
+        assert q & doc

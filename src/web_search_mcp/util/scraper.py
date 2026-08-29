@@ -3,7 +3,7 @@ import logging
 import re
 import socket
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import lxml.etree
 import lxml.html
@@ -136,16 +136,36 @@ class WebScraper:
         os dias 23-26 como sendo os próximos — errado, e sem nenhum sinal de
         que era material vencido.
         """
+        return [(text, date) for text, date, _ in self._fetch(urls, reject_index)]
+
+    def read_many_located(
+        self, urls: list[str], reject_index: bool = False
+    ) -> list[tuple[str, str]]:
+        """read_many + a URL final de cada página, depois dos redirects.
+
+        Quem pediu uma URL específica precisa saber se caiu em outra. Um
+        redirect 3xx para uma página genérica é indistinguível de um acerto
+        quando só o texto volta: o servidor responde 200, a extração dá
+        conteúdo, e nada denuncia que o endereço pedido não existe. Sem esse
+        sinal não há condição de parada, e quem chamou fica chutando
+        endereços e recebendo sempre a mesma página.
+        """
+        return [(text, final) for text, _, final in self._fetch(urls, reject_index)]
+
+    def _fetch(
+        self, urls: list[str], reject_index: bool = False
+    ) -> list[tuple[str, str | None, str]]:
+        """Baixa e extrai: (texto, data de publicação, URL final)."""
         if not urls:
             return []
         with ThreadPoolExecutor(max_workers=len(urls)) as pool:
             downloaded = list(pool.map(self._download, urls))
-        out: list[tuple[str, str | None]] = []
-        for ok, html in downloaded:
+        out: list[tuple[str, str | None, str]] = []
+        for (ok, html, final), requested in zip(downloaded, urls):
             if not ok:
-                out.append((html, None))
+                out.append((html, None, final or requested))
                 continue
-            out.append((self._extract(html, reject_index), self._page_date(html)))
+            out.append((self._extract(html, reject_index), self._page_date(html), final))
         return out
 
     @staticmethod
@@ -166,14 +186,7 @@ class WebScraper:
         extração leva ~0,2s para 10 páginas em série contra ~0,2s em
         paralelo — não há nada a ganhar arriscando.
         """
-        if not urls:
-            return []
-        with ThreadPoolExecutor(max_workers=len(urls)) as pool:
-            downloaded = list(pool.map(self._download, urls))
-        return [
-            self._extract(html, reject_index) if ok else html
-            for ok, html in downloaded
-        ]
+        return [text for text, _, _ in self._fetch(urls, reject_index)]
 
     def read(self, url: str) -> str:
         """Lê uma única URL."""
@@ -208,6 +221,36 @@ class WebScraper:
         return anchor / total
 
     @staticmethod
+    def redirected(requested: str, final: str) -> bool:
+        """True quando a página entregue não é o endereço que foi pedido.
+
+        Compara só host (sem www) e caminho (sem barra final), ignorando
+        esquema e query: canonicalização (http->https, // final, ?utm=) não
+        é o agente ter caído em outro lugar. Um 3xx que troca o caminho é.
+        """
+        def key(u: str) -> tuple[str, str]:
+            parts = urlsplit(u)
+            host = parts.netloc.lower().removeprefix("www.")
+            return host, parts.path.rstrip("/").lower()
+
+        try:
+            return key(requested) != key(final)
+        except ValueError:  # URL malformada: sem base de comparação
+            return False
+
+    @staticmethod
+    def redirect_notice(requested: str, final: str) -> str:
+        """Aviso a prefixar no texto quando houve redirect, senão vazio."""
+        if not final or not WebScraper.redirected(requested, final):
+            return ""
+        return (
+            f"(atenção: {requested} não existe ou foi movida — o servidor "
+            f"redirecionou para {final}, e o texto abaixo é dessa outra "
+            f"página. Não tente adivinhar variações do endereço pedido: "
+            f"procure o link real a partir da página entregue ou de uma busca.)\n\n"
+        )
+
+    @staticmethod
     def failed(text: str) -> bool:
         """True quando o texto é um aviso de falha, não conteúdo da página.
 
@@ -228,11 +271,11 @@ class WebScraper:
         """
         return WebScraper.failed(text) or len(text.strip()) < _MIN_USEFUL_CHARS
 
-    def _download(self, url: str) -> tuple[bool, str]:
-        """Devolve (sucesso, html) ou (False, motivo da falha)."""
+    def _download(self, url: str) -> tuple[bool, str, str]:
+        """Devolve (sucesso, html, URL final) ou (False, motivo, URL pedida)."""
         if not self._is_safe_url(url):
             logger.error("download bloqueado por segurança: url=%s", url)
-            return False, "(URL bloqueada por segurança)"
+            return False, "(URL bloqueada por segurança)", url
         try:
             resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=self.timeout)
             resp.raise_for_status()
@@ -240,8 +283,8 @@ class WebScraper:
             # Devolve texto em vez de levantar: uma página ruim não deve
             # derrubar a pesquisa inteira.
             logger.error("download falhou: url=%s erro=%s", url, e)
-            return False, f"(não foi possível ler a página: {e})"
-        return True, resp.text
+            return False, f"(não foi possível ler a página: {e})", url
+        return True, resp.text, resp.url or url
 
     def _extract(self, html: str, reject_index: bool = False) -> str:
         # Índice não responde pergunta: o modelo lê manchete solta e serve

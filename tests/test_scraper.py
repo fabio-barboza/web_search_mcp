@@ -148,3 +148,42 @@ class TestLinkDensity:
         out = sc._extract(self._ARTICLE, reject_index=True)
         assert not WebScraper.failed(out)
         assert "parágrafo real" in out
+
+
+class TestRedirected:
+    """Corpus de assuntos não relacionados, nos DOIS desfechos.
+
+    A regra tem que aceitar canonicalização (o caso comum e benigno) e
+    recusar 3xx que troca de página (o que trava o agente em chute de
+    endereço). Medido em 29/08/2026 contra tailscale.com/kb/9999999/x, que
+    devolve 308 -> /docs com HTTP 200 e 2.2k chars de conteúdo válido.
+    """
+
+    @pytest.mark.parametrize("requested,final", [
+        # mesma página: só canonicalização
+        ("http://exemplo.com/artigo", "https://exemplo.com/artigo"),
+        ("https://www.bbc.com/news/123", "https://bbc.com/news/123"),
+        ("https://pypi.org/project/requests/", "https://pypi.org/project/requests"),
+        ("https://loja.com/item/42", "https://loja.com/item/42?utm_source=x"),
+        ("https://Docs.Python.ORG/3/library/os.html", "https://docs.python.org/3/library/os.html"),
+    ])
+    def test_canonicalizacao_nao_e_redirect(self, requested, final):
+        assert WebScraper.redirected(requested, final) is False
+        assert WebScraper.redirect_notice(requested, final) == ""
+
+    @pytest.mark.parametrize("requested,final", [
+        # caiu em outra página: soft 404, hub genérico, domínio trocado
+        ("https://tailscale.com/kb/9999999/nao-existe", "https://tailscale.com/docs"),
+        ("https://bg3.wiki/wiki/Pagina_Inventada", "https://bg3.wiki/wiki/Main_Page"),
+        ("https://receitas.com/bolo-de-cenoura", "https://receitas.com/"),
+        ("https://banco.com.br/tarifas/2019", "https://banco.com.br/atendimento"),
+        ("https://old.site.com/manual", "https://novo.site.com/manual"),
+    ])
+    def test_pagina_trocada_e_redirect(self, requested, final):
+        assert WebScraper.redirected(requested, final) is True
+        notice = WebScraper.redirect_notice(requested, final)
+        assert requested in notice and final in notice
+        assert "não existe ou foi movida" in notice
+
+    def test_final_vazio_nao_avisa(self):
+        assert WebScraper.redirect_notice("https://x.com/a", "") == ""

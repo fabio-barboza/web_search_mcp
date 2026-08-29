@@ -1,3 +1,5 @@
+import threading
+
 import requests
 
 from .. import config
@@ -19,6 +21,8 @@ class SearXNG:
         self.timeout = timeout
         self.language = language
         self.categories = categories
+        self._lock = threading.Lock()
+        self._unresponsive: dict[str, str] = {}
 
     def search(self, query: str, time_range: str | None = None) -> list[dict]:
         """Devolve os resultados crus do SearXNG (título, url, content).
@@ -44,4 +48,30 @@ class SearXNG:
             timeout=self.timeout,
         )
         response.raise_for_status()
-        return response.json().get("results", [])[: self.max_results]
+        payload = response.json()
+        self._note_health(payload)
+        return payload.get("results", [])[: self.max_results]
+
+    def _note_health(self, payload: dict) -> None:
+        """Registra os motores que não responderam nesta busca.
+
+        Motor suspenso (CAPTCHA, limite de taxa) não é erro: o SearXNG
+        responde 200 com o que sobrou. Quando sobra pouco, a busca devolve
+        ruído de marca em vez de resultado, e quem chamou não tem como
+        distinguir isso de "o assunto não existe na web" — então repete a
+        busca sem parar. O acúmulo aqui é o que permite dizer a verdade.
+        """
+        with self._lock:
+            for entry in payload.get("unresponsive_engines") or []:
+                if isinstance(entry, (list, tuple)) and entry:
+                    reason = str(entry[1]) if len(entry) > 1 else ""
+                    self._unresponsive[str(entry[0])] = reason
+
+    def health(self) -> dict[str, str]:
+        """Motores fora do ar desde o último reset_health(): nome -> motivo."""
+        with self._lock:
+            return dict(self._unresponsive)
+
+    def reset_health(self) -> None:
+        with self._lock:
+            self._unresponsive.clear()

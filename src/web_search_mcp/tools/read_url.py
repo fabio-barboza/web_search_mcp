@@ -30,9 +30,12 @@ def read_url(url: str) -> str:
         url: O endereço completo da página (http/https).
     """
     logger.info("read_url chamada: url=%s", url)
-    text = _scraper.read(url)
+    text, final = _scraper.read_many_located([url])[0]
     if WebScraper.failed(text):
         logger.error("read_url falhou: url=%s motivo=%s", url, text)
-    else:
-        logger.info("read_url ok: url=%s tamanho=%d", url, len(text))
-    return text
+        return text
+    notice = WebScraper.redirect_notice(url, final)
+    if notice:
+        logger.warning("read_url redirecionada: pedida=%s final=%s", url, final)
+    logger.info("read_url ok: url=%s tamanho=%d", final, len(text))
+    return notice + text

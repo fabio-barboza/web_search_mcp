@@ -216,6 +216,38 @@ def _collect_links(query: str, recent: bool) -> list[dict]:
     return _merge_results(per_query, query)
 
 
+def _search_health_note(results: list[dict]) -> str:
+    """Aviso quando a busca rodou com a maior parte dos motores fora.
+
+    Sem número mágico: compara os motores suspensos com os que de fato
+    trouxeram resultado nesta busca. Só avisa quando os mortos são maioria
+    — um motor a menos entre dez não muda a cobertura, mas dez entre onze
+    transformam a busca em casamento de nome de marca (medido em
+    29/08/2026: só o bing respondia, e "tailscale ACL limitar portas" e
+    "tailscale acl ports dst example" devolviam a mesma lista de
+    homepages). O aviso existe para o agente parar em vez de reformular a
+    pergunta para sempre contra uma infraestrutura que não vai melhorar
+    nos próximos minutos.
+    """
+    down = _search.health()
+    if not down:
+        return ""
+    live = {e for r in results for e in (r.get("engines") or [])}
+    if len(down) <= len(live):
+        return ""
+    nomes = ", ".join(f"{k} ({v})" if v else k for k, v in sorted(down.items()))
+    respondeu = ", ".join(sorted(live)) or "nenhum"
+    return (
+        f"AVISO DE INFRAESTRUTURA: {len(down)} motores de busca estão "
+        f"suspensos agora ({nomes}); respondeu apenas: {respondeu}. A "
+        f"cobertura abaixo está incompleta por isso, não porque o assunto "
+        f"não exista. Repetir a pesquisa, reescrever a pergunta ou chutar "
+        f"endereços com read_url NÃO vai melhorar: a suspensão dura horas. "
+        f"Se o material abaixo não responder, diga ao usuário que a busca "
+        f"está degradada em vez de tentar de novo.\n\n"
+    )
+
+
 def _merge_results(per_query: list[list[dict]], query: str = "") -> list[dict]:
     """Mescla os resultados das várias buscas, melhores primeiro.
 
@@ -542,7 +574,18 @@ _STOPWORDS = frozenset((
     "quem me meu minha seu sua ao aos à às pelo pela é são foi ser esta "
     "este essa esse isso aquilo mais menos muito bem ja já entao então "
     "the a an of in on at to for from by with about and or what which "
-    "who how when where is are was were be been do does did"
+    "who how when where is are was were be been do does did "
+    # Verbos e pronomes de função: aparecem na pergunta inteira em linguagem
+    # natural e não dizem nada sobre o assunto. Sem eles, "Tem como adicionar
+    # um usuário no tailscale mas limitar as portas?" casava com páginas de
+    # gramática sobre "tem ou têm" — e o casamento em "tem" fazia a demoção
+    # lexical aceitá-las como se fossem do assunto (medido em 29/08/2026).
+    "tem tenho temos ter tinha pode posso podem podemos poder podia deve "
+    "devo devem dever preciso precisa precisam vai vou vamos vao vão "
+    "eu ele ela eles elas voce você nos nós lhe dele dela isto aquele aquela "
+    "nao não sim mas tambem também so só ainda ja mesmo cada qualquer "
+    "has have had can could should would will shall may might must need "
+    "it its this that these those they he she we you not but also only"
 .split()))
 
 
@@ -634,6 +677,7 @@ def research_web(query: str, recent: bool = False) -> str:
         logger.warning("research_web: repetição detectada, devolvendo resultado anterior: query=%r", query)
         return _REPEAT_NOTE + cached
 
+    _search.reset_health()
     try:
         results = _collect_links(query, recent)
     except requests.RequestException as e:
@@ -644,7 +688,7 @@ def research_web(query: str, recent: bool = False) -> str:
         logger.info("research_web: nenhum resultado para query=%r", query)
         # Também entra no cache anti-loop: resultado vazio é o gatilho mais
         # comum de re-chamada em círculo.
-        outcome = (
+        outcome = _search_health_note(results) + (
             "Nenhum resultado encontrado. Não repita a busca com a mesma "
             "pergunta reescrita; diga ao usuário que não encontrou."
         )
@@ -654,7 +698,7 @@ def research_web(query: str, recent: bool = False) -> str:
     pages_read = _read_pages(results)
     if not pages_read:
         logger.error("research_web: todas as %d páginas candidatas falharam para query=%r", len(results), query)
-        outcome = "Nenhuma das páginas encontradas pôde ser lida."
+        outcome = _search_health_note(results) + "Nenhuma das páginas encontradas pôde ser lida."
         _remember_result(query, outcome)
         return outcome
 
@@ -700,6 +744,9 @@ def research_web(query: str, recent: bool = False) -> str:
         f"({utc_now.strftime('%H:%M')} UTC)."
     )
     logger.info("research_web ok: query=%r páginas_lidas=%d", query, len(pages_read))
-    result = f"{stamp}\n\n{summary}\n\n{relay_note}\n\nURLs consultadas:\n{sources}"
+    result = (
+        f"{_search_health_note(results)}{stamp}\n\n{summary}\n\n"
+        f"{relay_note}\n\nURLs consultadas:\n{sources}"
+    )
     _remember_result(query, result)
     return result

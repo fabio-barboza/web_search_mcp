@@ -76,6 +76,38 @@ is not in the list is deleted from the summary, not left dangling.
 This holds for anything the tool returns, now and later. If a future format
 change makes attribution depend on a separate block again, it is wrong.
 
+## MANDATORY: quem lê uma página tem que saber qual página leu
+
+Um 3xx que troca de endereço é invisível quando só o texto volta: o
+servidor responde 200, a extração dá conteúdo, e nada denuncia que a URL
+pedida não existe. Sem esse sinal não há condição de parada — observado em
+29/08/2026: `tailscale.com/kb/9999999/nao-existe` responde 308 para
+`/docs`, o agente leu a página genérica, concluiu que era a errada, chutou
+outro número de KB, caiu na MESMA página, e repetiu isso por mais de dez
+chamadas até desistir sem responder nada.
+
+Então `_download` devolve a URL final e `read_url`/`analyze_urls` avisam
+quando ela difere da pedida (`WebScraper.redirect_notice`). A comparação
+ignora esquema, `www.`, barra final e query — canonicalização não é o
+agente ter caído em outro lugar. Vale para qualquer formato futuro: o
+texto de uma página nunca deve ser entregue sob um endereço que não é o
+dele.
+
+## MANDATORY: busca degradada tem que ser dita, não disfarçada
+
+Motor de busca suspenso (CAPTCHA, limite de taxa) não é erro: o SearXNG
+responde 200 com o que sobrou. Quando sobra pouco, o resultado é
+casamento de nome de marca, e quem chamou não distingue isso de "o assunto
+não existe" — então reformula a pergunta para sempre. Medido em
+29/08/2026, com 13 de 15 motores suspensos, duas queries técnicas
+completamente diferentes devolveram a mesma lista de homepages.
+
+`_search_health_note` compara os motores mortos com os que responderam
+naquela busca (sem constante mágica, ajusta sozinho a qualquer instância)
+e, quando os mortos são maioria, prefixa a resposta com o aviso e a
+instrução explícita de NÃO repetir. Isso é infraestrutura, não assunto:
+o aviso não sabe o que foi perguntado.
+
 ## Commands
 
 ```bash

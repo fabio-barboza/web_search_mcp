@@ -61,7 +61,7 @@ def analyze_urls(urls: list[str], request: str = "Resuma o conteúdo.") -> str:
         )
     logger.info("analyze_urls: %d url(s), request=%r", len(urls), request)
 
-    pages = _scraper.read_many(urls)
+    pages = _scraper.read_many_located(urls)
 
     # Orçamento repartido por página: N páginas gigantes precisam caber
     # juntas na janela; o corte por página preserva o começo de todas em vez
@@ -71,12 +71,18 @@ def analyze_urls(urls: list[str], request: str = "Resuma o conteúdo.") -> str:
     read_ok: list[str] = []
     failed: list[tuple[str, str]] = []
     blocks: list[str] = []
-    for url, page in zip(urls, pages):
+    for url, (page, final) in zip(urls, pages):
         if WebScraper.failed(page):
             failed.append((url, page))
             continue
         read_ok.append(url)
-        blocks.append(f"URL: {url}\nConteúdo:\n{page[:per_page]}")
+        # A URL entregue vale mais que a pedida: citar o endereço que o
+        # servidor abandonou num 3xx é atribuir o texto a uma página que não
+        # o contém.
+        header = f"URL: {final}"
+        if WebScraper.redirected(url, final):
+            header += f" (redirecionada de {url}, que não existe mais)"
+        blocks.append(f"{header}\nConteúdo:\n{page[:per_page]}")
 
     if not read_ok:
         details = "\n".join(f"- {u}: {m}" for u, m in failed)
