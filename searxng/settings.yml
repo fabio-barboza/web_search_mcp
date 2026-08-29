@@ -91,15 +91,27 @@ categories_as_tabs:
   files:
   social media:
 
+# Diversidade de motor é o que segura a busca de pé. Todo motor aqui é
+# raspador de página: cada um cai sozinho por CAPTCHA ou rate-limit, e o
+# `suspended_times` acima tira o motor caído do ar por até 24h. Medido em
+# 29/08/2026, com só duckduckgo/google/startpage/yahoo habilitados: uma
+# tarde de pesquisas suspendeu os quatro e a instância passou a devolver
+# ZERO resultado ("principais notícias do Brasil hoje" -> 0; "world news
+# today" -> 0 com time_range=day). Com brave/bing/mojeek/qwant/yep/
+# presearch ligados, a mesma busca voltou a 20-31 resultados.
+#
+# Quando a busca fica sem resultado, ela casa a frase pela palavra
+# funcional e devolve verbete de dicionário — o pipeline do research_web
+# demove isso, mas não inventa material que a busca não trouxe.
 engines:
   - name: duckduckgo
     disabled: false
   - name: brave
-    disabled: true
+    disabled: false
   - name: google
     disabled: false
   - name: bing
-    disabled: true
+    disabled: false
   - name: wikipedia
     disabled: false
 
@@ -111,9 +123,9 @@ engines:
     disabled: false
 
   - name: mojeek
-    disabled: true
+    disabled: false
   - name: qwant
-    disabled: true
+    disabled: false
   - name: startpage
     disabled: false
   - name: yahoo
@@ -121,9 +133,9 @@ engines:
   - name: wikidata
     disabled: true
   - name: presearch
-    disabled: true
+    disabled: false
   - name: yep
-    disabled: true
+    disabled: false
 
   - name: gitlab
     disabled: true
