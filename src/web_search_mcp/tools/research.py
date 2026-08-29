@@ -24,21 +24,15 @@ _RECENT_WINDOW = "day"
 _QUERIES_INSTRUCTION = (
     "Você planeja buscas web. Dada uma pergunta, escreva 3 buscas curtas e "
     "DIFERENTES entre si que, juntas, cobrem a resposta por ângulos "
-    "distintos — 4 buscas quando a pergunta for ampla (panorama, 'Brasil e "
-    "mundo', comparação de várias coisas), porque ângulo que não vira busca "
+    "distintos — 4 buscas quando a pergunta for ampla (várias coisas "
+    "comparadas, várias facetas), porque ângulo que não vira busca "
     "não aparece no resultado. Uma busca por linha, sem numerar, sem explicar. Use os "
     "termos que apareceriam na página procurada, não a pergunta inteira. "
     "Se a pergunta for sobre uma pessoa, inclua buscas que combinem o nome "
     "com onde ela apareceria (github, linkedin, currículo, empresa). "
-    "Se o assunto tiver boa cobertura internacional (tecnologia, ciência, "
-    "notícia mundial), escreva UMA das buscas em inglês — as fontes "
-    "internacionais de referência costumam ter o material mais completo. "
-    "Se a pergunta pedir um panorama das notícias do dia, dedique uma busca "
-    "só às manchetes gerais (ex.: 'principais manchetes Brasil hoje') e uma "
-    "em inglês às internacionais NOMEANDO veículos de referência (ex.: "
-    "'world news today Reuters BBC AP') — sem o nome dos veículos a busca "
-    "em inglês devolve agregadores de SEO, e sem essas buscas o resultado "
-    "enviesa para a editoria que calhar de ranquear melhor."
+    "Se o assunto puder ter cobertura internacional, escreva UMA das buscas "
+    "em inglês — quando existe material em inglês, costuma ser o mais "
+    "completo."
 )
 
 _BASE_INSTRUCTION = (
@@ -56,10 +50,9 @@ _BASE_INSTRUCTION = (
     "o que o material datar de hoje. Ignore páginas irrelevantes ou que "
     "falharam. Nunca invente nada: se o material não responder, diga "
     "exatamente o que faltou. Não copie o conteúdo bruto das páginas. Se a "
-    "pergunta pedir um panorama de notícias do dia, priorize COBERTURA "
-    "sobre profundidade: 12 ou mais manchetes distintas, uma ou duas "
-    "linhas cada, agrupadas por seção — não gaste o espaço aprofundando "
-    "poucos temas. Fontes em outros idiomas valem tanto quanto as em "
+    "pergunta for ampla, priorize COBERTURA sobre profundidade: mais itens "
+    "curtos, de uma ou duas linhas, em vez de poucos temas aprofundados. "
+    "Fontes em outros idiomas valem tanto quanto as em "
     "português: traduza os fatos delas com fidelidade, mantendo nomes "
     "próprios, siglas e termos técnicos na forma original quando não "
     "houver tradução consagrada."
@@ -110,10 +103,9 @@ def _generate_queries(question: str) -> list[str]:
     for v in variants:
         if v.lower() not in {q.lower() for q in queries}:
             queries.append(v)
-    # 5 = original + 4 variantes (o teto de 4 cortava justamente a busca
-    # dedicada às manchetes internacionais em pergunta ampla — medido:
-    # panorama "Brasil e mundo" perdia a manchete do dia por falta de
-    # fan-out, não por leitura ruim das páginas).
+    # 5 = original + 4 variantes. O teto de 4 cortava a última busca gerada
+    # em pergunta ampla, e o ângulo perdido não voltava por leitura melhor
+    # das páginas: o que não vira busca não existe no resultado.
     return queries[:5]
 
 
@@ -184,127 +176,6 @@ def _search_one(args: tuple[str, bool]) -> list[dict]:
     return results
 
 
-# Capas de veículos de referência, semeadas no topo dos candidatos quando a
-# pergunta pede panorama de notícias. Motor de busca não devolve capa para
-# "principais manchetes hoje" — devolve digest de SEO e agregador requentado
-# (medido: recall de 1/16 contra as manchetes do Google News). A capa é onde
-# as manchetes do dia realmente estão, e o _clean do scraper foi feito para
-# esse tipo de página. Fora do caso panorama, nada muda.
-_SEEDS_BR = [
-    "https://g1.globo.com/",
-    "https://noticias.uol.com.br/",
-    "https://www.cnnbrasil.com.br/",
-    # Redundância de agenda BR: g1 às vezes extrai curto demais (<600 chars)
-    # e o UOL devolve 403 sob repetição — a lista da EBC extrai sempre.
-    "https://agenciabrasil.ebc.com.br/ultimas",
-]
-_SEEDS_WORLD = [
-    "https://www.bbc.com/news",
-    "https://apnews.com/",
-]
-
-_NEWS_RE = re.compile(r"not[íi]cias?|manchetes?|headlines?|\bnews\b", re.I)
-_WORLD_RE = re.compile(r"mundo|internacion|world|global", re.I)
-# Panorama temático (tecnologia, games...) tem fontes próprias melhores que
-# capa de jornal generalista: nesses casos a busca normal resolve.
-_TOPIC_RE = re.compile(
-    r"tecnolog|ci[êe]nc|game|jogo|esport|econom|pol[íi]tic|sa[úu]de", re.I
-)
-
-
-def _panorama_seeds(query: str, recent: bool) -> list[dict]:
-    if not recent or not _NEWS_RE.search(query) or _TOPIC_RE.search(query):
-        return []
-    seeds = list(_SEEDS_BR)
-    if _WORLD_RE.search(query):
-        seeds += _SEEDS_WORLD
-    return [{"url": u, "title": "", "content": ""} for u in seeds]
-
-
-# Quantas matérias extrair de cada capa semeada. A ordem do DOM da capa é a
-# hierarquia editorial do veículo — os primeiros links são a manchete.
-# 2 e não mais: a mesma história aparece no topo de várias capas, e cada
-# matéria repetida sobre ela rouba uma vaga da pauta seguinte (medido:
-# Braskem ocupou 3 das 10 páginas de um panorama).
-_ARTICLES_PER_FRONT = 2
-
-# Caminho com cara de matéria: data na URL, /article(s)/, ou slug longo com
-# hífens. Link de navegação (/politica/, /esportes/) não passa.
-_ARTICLE_PATH_RE = re.compile(r"/20\d{2}/\d{2}/|/articles?/")
-
-
-def _article_links(front_url: str, html: str, limit: int) -> list[tuple[str, str]]:
-    """Extrai (url, título) das matérias de uma capa, na ordem do DOM.
-
-    Capa é ótima para saber O QUE é notícia e péssima como conteúdo: só
-    manchete, sem corpo — resumo feito dela erra contexto e cita o índice
-    como fonte. Daqui saem os links; quem entra no dossiê é a matéria.
-    """
-    import lxml.etree
-    import lxml.html
-    from urllib.parse import urljoin
-
-    try:
-        root = lxml.html.fromstring(html)
-    except (lxml.etree.ParserError, ValueError):
-        return []
-
-    host = urlsplit(front_url).netloc.lower().removeprefix("www.")
-    out: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for a in root.iter("a"):
-        href = a.get("href")
-        if not href:
-            continue
-        url = urljoin(front_url, href)
-        parts = urlsplit(url)
-        if parts.scheme not in ("http", "https"):
-            continue
-        if parts.netloc.lower().removeprefix("www.") != host:
-            continue
-        path = parts.path.rstrip("/")
-        slug = path.rsplit("/", 1)[-1]
-        if not (_ARTICLE_PATH_RE.search(path) or (len(slug) > 25 and "-" in slug)):
-            continue
-        key = _normalize_url(url)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append((url, " ".join(a.text_content().split())[:120]))
-        if len(out) >= limit:
-            break
-    return out
-
-
-def _expand_seeds(seeds: list[dict]) -> list[dict]:
-    """Capas semeadas + as matérias do topo de cada uma.
-
-    Híbrido de propósito: a capa dá a AGENDA (o que é notícia agora, muitas
-    manchetes) e as matérias dão o CORPO (contexto que evita erro de resumo
-    e URL verificável por item). Só matéria perdia cobertura (medido:
-    recall de manchetes caiu de 5/16 para 1/16); só capa perdia precisão.
-    Capa cujo download falhar segue como candidata ela mesma.
-    """
-    urls = [s["url"] for s in seeds]
-    with ThreadPoolExecutor(max_workers=len(urls)) as pool:
-        downloads = list(pool.map(_scraper._download, urls))
-
-    per_seed: list[list[dict]] = []
-    for seed, (ok, html) in zip(seeds, downloads):
-        links = _article_links(seed["url"], html, _ARTICLES_PER_FRONT) if ok else []
-        per_seed.append([{"url": u, "title": t, "content": ""} for u, t in links])
-
-    # Capas primeiro (cobertura garantida), depois as matérias intercaladas
-    # entre veículos (manchete de cada um antes da 2ª matéria de qualquer um)
-    # — assim o corte do orçamento de páginas preserva o equilíbrio.
-    expanded = list(seeds)
-    for i in range(max((len(lst) for lst in per_seed), default=0)):
-        for lst in per_seed:
-            if i < len(lst):
-                expanded.append(lst[i])
-    return expanded
-
-
 def _search_one_safe(args: tuple[str, bool]) -> list[dict]:
     """_search_one que não derruba as irmãs: variante que falhar vira lista
     vazia. A busca da pergunta original continua propagando erro — se ela
@@ -339,16 +210,7 @@ def _collect_links(query: str, recent: bool) -> list[dict]:
         per_query = []
     per_query.insert(0, original_results)
 
-    merged = _merge_results(per_query)
-
-    seeds = _panorama_seeds(query, recent)
-    if seeds:
-        articles = _expand_seeds(seeds)
-        seeded = {_normalize_url(s["url"]) for s in articles}
-        merged = articles + [
-            r for r in merged if _normalize_url(r.get("url", "")) not in seeded
-        ]
-    return merged
+    return _merge_results(per_query)
 
 
 def _merge_results(per_query: list[list[dict]]) -> list[dict]:
@@ -393,7 +255,7 @@ def _merge_results(per_query: list[list[dict]]) -> list[dict]:
 
     # Teto por domínio: sem ele, uma busca cujo top-10 é todo do mesmo site
     # enche a reserva com um veículo só e o dossiê perde variedade (medido:
-    # metade das fontes de um panorama saiu da mesma redação). 0 = sem teto.
+    # metade das fontes de um resultado saiu da mesma redação). 0 = sem teto.
     merged: list[dict] = []
     seen: set[str] = set()
     per_domain: dict[str, int] = {}
@@ -503,7 +365,6 @@ def _label_citations(summary: str, pages_read: list[tuple[dict, str, str]]) -> s
 def _read_pages(
     candidates: list[dict],
     page_budget: int | None = None,
-    reject_index: bool = False,
 ) -> list[tuple[dict, str, str]]:
     """Lê candidatos em ondas até juntar RESEARCH_PAGE_BUDGET páginas boas.
 
@@ -533,7 +394,7 @@ def _read_pages(
             break
         remaining = budget - len(pages_read)
         batch, queue = queue[:remaining], queue[remaining:]
-        pages = _scraper.read_many([u for _, u in batch], reject_index=reject_index)
+        pages = _scraper.read_many([u for _, u in batch], reject_index=True)
         for (r, url), page in zip(batch, pages):
             if WebScraper.unusable(page):
                 logger.error(
@@ -541,7 +402,7 @@ def _read_pages(
                     wave + 1, url, len(page), page[:120],
                 )
                 continue
-            if reject_index and _is_hub_page(url, page):
+            if _is_hub_page(url, page):
                 logger.info(
                     "_read_pages: onda %d, descartada url=%s: página-hub "
                     "(vitrine de links, sem conteúdo próprio)",
@@ -594,22 +455,8 @@ def _build_dossier(query: str, recent: bool) -> tuple[str, list[tuple[dict, str,
     """Busca, lê e monta o dossiê. Separado de _summarize para o eval
     conseguir o dossiê sem repesquisar."""
     results = _collect_links(query, recent)
-    panorama = bool(_panorama_seeds(query, recent))
-    pages_read = (
-        _read_pages(
-            results,
-            config.RESEARCH_PANORAMA_PAGES if panorama else None,
-            reject_index=not panorama,
-        )
-        if results
-        else []
-    )
+    pages_read = _read_pages(results) if results else []
     return _render_dossier(pages_read), pages_read
-
-
-def _page_budget(query: str, recent: bool) -> int | None:
-    """Panorama usa orçamento próprio (capas + matérias); o resto, o padrão."""
-    return config.RESEARCH_PANORAMA_PAGES if _panorama_seeds(query, recent) else None
 
 
 def _summarize(query: str, dossier: str, recent: bool) -> str:
@@ -644,6 +491,7 @@ _REPEAT_NOTE = (
     "outra vez para esta pergunta: responda ao usuário com o que está "
     "abaixo, e se algo faltar, diga ao usuário o que faltou.\n\n"
 )
+
 
 # Palavras de função: mudam a frase sem mudar a pergunta. Lista de mecânica
 # de linguagem, não de assunto — vale para qualquer tema.
@@ -762,12 +610,7 @@ def research_web(query: str, recent: bool = False) -> str:
         _remember_result(query, outcome)
         return outcome
 
-    panorama = bool(_panorama_seeds(query, recent))
-    pages_read = _read_pages(
-        results,
-        config.RESEARCH_PANORAMA_PAGES if panorama else None,
-        reject_index=not panorama,
-    )
+    pages_read = _read_pages(results)
     if not pages_read:
         logger.error("research_web: todas as %d páginas candidatas falharam para query=%r", len(results), query)
         outcome = "Nenhuma das páginas encontradas pôde ser lida."

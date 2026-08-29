@@ -40,12 +40,24 @@ Test any new heuristic against a corpus spanning unrelated subjects and
 BOTH outcomes (pages it must reject AND pages it must keep), and record the
 numbers in a comment. A rule validated on one subject is not validated.
 
-Known debt against this rule: the news-panorama path (`_SEEDS_BR`,
-`_SEEDS_WORLD`, `_NEWS_RE`, `_panorama_seeds`, `_expand_seeds`,
-`RESEARCH_PANORAMA_PAGES`, and the panorama sentences inside
-`_QUERIES_INSTRUCTION`/`_BASE_INSTRUCTION`) is subject-specific and
-pre-dates this rule. Do not extend it, do not copy its shape for another
-subject.
+The news-panorama path that used to live here (`_SEEDS_BR`, `_SEEDS_WORLD`,
+`_panorama_seeds`, `_expand_seeds`, `_article_links`,
+`RESEARCH_PANORAMA_PAGES`, the `evals/headlines.py` eval and the panorama
+sentences in `_QUERIES_INSTRUCTION`/`_BASE_INSTRUCTION`) was DELETED on
+2026-08-29, and with it the last subject-specific code in the pipeline. It
+seeded newspaper front pages ahead of every search result whenever a query
+mentioned news and `recent=True`, gated by a blacklist of topics
+(`tecnolog|game|esport|...`). The blacklist failed exactly as this rule
+predicts: "Alguma notícia relevante de que será lançado o Qwen3.8:35B?"
+matched none of its words, so the whole page budget went to Brazilian
+election coverage and the answer contained zero facts about what was asked.
+The same question without the seeds answers correctly from 6 pages.
+
+Do not bring it back, in any shape — not seed URLs, not a per-subject page
+budget, not a gate that asks what a question is about. If broad "what
+happened today" questions ever need better coverage, the fix goes in search
+infrastructure (engines, ranking, fan-out), which is generic by
+construction.
 
 ## MANDATORY: a citation marker requires its link in the text
 

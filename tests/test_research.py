@@ -236,30 +236,6 @@ class TestMergeResults:
         assert len(urls) == 3
 
 
-class TestPanoramaSeeds:
-    def test_news_panorama_gets_br_and_world_seeds(self):
-        seeds = research._panorama_seeds(
-            "Faça um resumo das principais noticias no Brasil e no mundo hoje?", True
-        )
-        urls = [s["url"] for s in seeds]
-        assert "https://g1.globo.com/" in urls
-        assert "https://www.bbc.com/news" in urls
-
-    def test_br_only_panorama_skips_world_seeds(self):
-        seeds = research._panorama_seeds("principais notícias do dia", True)
-        urls = [s["url"] for s in seeds]
-        assert urls and all("bbc" not in u and "apnews" not in u for u in urls)
-
-    def test_topic_panorama_gets_no_seeds(self):
-        assert research._panorama_seeds("principais notícias de tecnologia hoje", True) == []
-
-    def test_non_recent_gets_no_seeds(self):
-        assert research._panorama_seeds("história das notícias no Brasil", False) == []
-
-    def test_non_news_question_gets_no_seeds(self):
-        assert research._panorama_seeds("qual a cotação do dólar hoje?", True) == []
-
-
 class TestNormalizeUrl:
     def test_strips_tracking_fragment_and_trailing_slash(self):
         url = "https://Site.com/artigo/?utm_source=x&utm_campaign=y&fbclid=abc&id=7#secao"
@@ -322,63 +298,6 @@ class TestSearchOneSafe:
              patch.object(research, "_search_one", side_effect=fake_search_one):
             results = research._collect_links("pergunta", False)
         assert [r["url"] for r in results] == ["http://ok.com"]
-
-
-class TestArticleLinks:
-    HTML = """
-    <html><body>
-      <a href="/politica/noticia/2026/08/24/manchete-principal-do-dia.ghtml">Manchete principal</a>
-      <a href="/esportes/">Esportes</a>
-      <a href="https://outro-site.com/2026/08/24/materia-externa.html">Externa</a>
-      <a href="/news/articles/c1234abcd">Article BBC-style</a>
-      <a href="/coluna/um-slug-bem-comprido-com-muitas-palavras-aqui">Slug longo</a>
-      <a href="/politica/noticia/2026/08/24/manchete-principal-do-dia.ghtml?utm_source=x">Duplicada</a>
-      <a href="#topo">Âncora</a>
-    </body></html>
-    """
-
-    def test_extracts_article_links_in_dom_order(self):
-        links = research._article_links("https://www.site.com/", self.HTML, 10)
-        urls = [u for u, _ in links]
-        assert urls == [
-            "https://www.site.com/politica/noticia/2026/08/24/manchete-principal-do-dia.ghtml",
-            "https://www.site.com/news/articles/c1234abcd",
-            "https://www.site.com/coluna/um-slug-bem-comprido-com-muitas-palavras-aqui",
-        ]
-        assert links[0][1] == "Manchete principal"
-
-    def test_respects_limit(self):
-        links = research._article_links("https://www.site.com/", self.HTML, 1)
-        assert len(links) == 1
-
-    def test_invalid_html_returns_empty(self):
-        assert research._article_links("https://x.com/", "", 5) == []
-
-
-class TestExpandSeeds:
-    def test_interleaves_across_fronts_and_falls_back(self):
-        def fake_download(url):
-            if "a.com" in url:
-                return True, (
-                    '<a href="/2026/08/24/a1-materia-um">A1</a>'
-                    '<a href="/2026/08/24/a2-materia-dois">A2</a>'
-                )
-            return False, "(falhou)"
-
-        seeds = [
-            {"url": "https://a.com/", "title": "", "content": ""},
-            {"url": "https://b.com/", "title": "", "content": ""},
-        ]
-        with patch.object(research._scraper, "_download", side_effect=fake_download):
-            out = research._expand_seeds(seeds)
-        urls = [r["url"] for r in out]
-        # híbrido: capas primeiro (agenda), depois as matérias intercaladas
-        assert urls == [
-            "https://a.com/",
-            "https://b.com/",
-            "https://a.com/2026/08/24/a1-materia-um",
-            "https://a.com/2026/08/24/a2-materia-dois",
-        ]
 
 
 class TestRepeatGuard:
@@ -487,23 +406,9 @@ class TestSuspiciousUrl:
 
 
 class TestRejectIndex:
-    def test_panorama_reads_index_pages(self):
-        """Panorama lê capa de propósito: não pode rejeitar índice."""
-        seen = {}
-
-        def fake_read_many(urls, reject_index=False):
-            seen["reject_index"] = reject_index
-            return ["conteúdo " + "x" * 2000 for _ in urls]
-
-        with patch.object(research._scraper, "read_many", side_effect=fake_read_many), \
-             patch("web_search_mcp.tools.research._collect_links",
-                   return_value=[{"url": "https://g1.globo.com/"}]), \
-             patch("web_search_mcp.tools.research._summarize", return_value="resumo"):
-            research.research_web("principais notícias do Brasil e do mundo hoje", recent=True)
-
-        assert seen["reject_index"] is False
-
-    def test_normal_question_rejects_index_pages(self):
+    def test_research_always_rejects_index_pages(self):
+        """Toda leitura do research pede rejeição de índice: o pipeline quer
+        a página que responde, nunca a vitrine de links para outras."""
         seen = {}
 
         def fake_read_many(urls, reject_index=False):
@@ -542,7 +447,7 @@ class TestHubPage:
         # Post curto publicado na raiz: poucas linhas, não é vitrine.
         assert not research._is_hub_page("https://blog.com/meu-post", "linha\nlinha\nlinha")
 
-    def test_hub_discarded_only_when_reject_index(self):
+    def test_hub_discarded_by_read_pages(self):
         candidates = [{"url": "https://portal.com/tecnologia/"}]
         page = self._MENU + "\n" + "x" * 1000
 
@@ -550,8 +455,7 @@ class TestHubPage:
                           side_effect=lambda urls, reject_index=False: [page]), \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 3), \
              patch.object(config, "RESEARCH_MAX_WAVES", 1):
-            assert research._read_pages(candidates, reject_index=True) == []
-            assert len(research._read_pages(candidates, reject_index=False)) == 1
+            assert research._read_pages(candidates) == []
 
 
 class TestLabelCitations:
