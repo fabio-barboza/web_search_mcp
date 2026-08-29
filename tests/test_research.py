@@ -80,9 +80,9 @@ class TestReadPages:
                     # piso de tamanho descarta a página e o teste mede a
                     # coisa errada.
                     out.append(f"conteúdo de {u} " + "x" * 2000)
-            return out
+            return [(t, None) for t in out]
 
-        with patch.object(research._scraper, "read_many", side_effect=fake_read_many), \
+        with patch.object(research._scraper, "read_many_dated", side_effect=fake_read_many), \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 3), \
              patch.object(config, "RESEARCH_MAX_WAVES", 4):
             pages = research._read_pages(candidates)
@@ -93,10 +93,10 @@ class TestReadPages:
     def test_respects_max_waves(self):
         candidates = [{"url": f"http://x.com/{i}"} for i in range(20)]
 
-        with patch.object(research._scraper, "read_many", return_value=None) as m, \
+        with patch.object(research._scraper, "read_many_dated", return_value=None) as m, \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 5), \
              patch.object(config, "RESEARCH_MAX_WAVES", 2):
-            m.side_effect = lambda urls, reject_index=False: ["(sem conteúdo extraível)" for _ in urls]
+            m.side_effect = lambda urls, reject_index=False: [("(sem conteúdo extraível)", None) for _ in urls]
             pages = research._read_pages(candidates)
 
         assert m.call_count == 2
@@ -107,7 +107,7 @@ class TestReadPages:
 
         # 12288 tokens úteis * _CHARS_PER_TOKEN = orçamento em caracteres.
         # Páginas de 12000 + cabeçalho (~79): duas cabem, a terceira não.
-        with patch.object(research._scraper, "read_many", side_effect=lambda urls, reject_index=False: ["c" * 12000 for _ in urls]), \
+        with patch.object(research._scraper, "read_many_dated", side_effect=lambda urls, reject_index=False: [("c" * 12000, None) for _ in urls]), \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 10), \
              patch.object(config, "RESEARCH_MAX_WAVES", 4), \
              patch.object(config, "MODEL_CONTEXT_TOKENS", 16384), \
@@ -120,7 +120,7 @@ class TestReadPages:
     def test_first_page_enters_even_if_over_budget(self):
         """Uma página sozinha maior que a janela ainda é melhor que nada: ela
         entra e o _render_dossier corta o excesso."""
-        with patch.object(research._scraper, "read_many", side_effect=lambda urls, reject_index=False: ["c" * 500000 for _ in urls]), \
+        with patch.object(research._scraper, "read_many_dated", side_effect=lambda urls, reject_index=False: [("c" * 500000, None) for _ in urls]), \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 3), \
              patch.object(config, "RESEARCH_MAX_WAVES", 1), \
              patch.object(config, "MODEL_CONTEXT_TOKENS", 16384), \
@@ -234,6 +234,71 @@ class TestMergeResults:
         urls = [r["url"] for r in research._merge_results(per_query)]
         assert urls[0] == "http://ok.com"
         assert len(urls) == 3
+
+
+class TestLexicalDemotion:
+    """Candidato sem token de conteúdo em comum com a pergunta vai ao fim.
+
+    Corpus de temas não relacionados e os dois desfechos: o que precisa
+    afundar E o que precisa continuar em cima.
+    """
+
+    @pytest.mark.parametrize("query,bom,ruim", [
+        (
+            "Como enfrentar o ultimo chefão em The Witcher 3?",
+            {"url": "https://www.thewitcher.com/br/pt-br", "title": "The Witcher"},
+            {"url": "https://en.wikipedia.org/wiki/Como_1907", "title": "Como 1907"},
+        ),
+        (
+            "Qual a melhor estratégia contra Ketheric Thorm?",
+            {"url": "https://gamerant.com/bg3-ketheric-thorm-guide/", "title": "Ketheric"},
+            {"url": "https://www.dicio.com.br/qual/", "title": "Qual - Dicio"},
+        ),
+        (
+            "Quando sai o próximo lançamento do telescópio James Webb?",
+            {"url": "https://nasa.gov/webb/launch", "title": "James Webb telescope"},
+            {"url": "https://www.onthisday.com/today/birthdays.php", "title": "Birthdays"},
+        ),
+    ])
+    def test_unrelated_candidate_sinks(self, query, bom, ruim):
+        # O ruim entra com score maior de propósito: a demoção tem que
+        # vencer o score, senão o lixo continua ocupando vaga.
+        ruim = {**ruim, "score": 9.0}
+        bom = {**bom, "score": 0.1}
+        urls = [r["url"] for r in research._merge_results([[ruim, bom]], query)]
+        assert urls.index(bom["url"]) < urls.index(ruim["url"])
+        # Demoção, não descarte: o candidato segue disponível como reserva.
+        assert ruim["url"] in urls
+
+    def test_junk_only_query_does_not_take_a_front_slot(self):
+        """Round-robin não pode dar a vaga do 1º lugar a uma busca que só
+        devolveu lixo: o 2º resultado bom de outra busca vem antes."""
+        boa = [
+            {"url": "https://bg3.wiki/wiki/Ketheric_Thorm/Combat", "title": "Ketheric"},
+            {"url": "https://gamespot.com/baldurs-gate-3-ketheric-guide/", "title": "Ketheric guide"},
+        ]
+        lixo = [{"url": "https://customerservice.costco.com/return-policy", "title": "Return policy"}]
+        urls = [r["url"] for r in research._merge_results(
+            [boa, lixo], "Qual a melhor estratégia contra Ketheric Thorm em Baldur's Gate 3?")]
+        assert urls[:2] == [boa[0]["url"], boa[1]["url"]]
+        assert urls[2] == lixo[0]["url"]
+
+    def test_no_query_keeps_previous_order(self):
+        a = {"url": "https://a.com/x", "title": "", "score": 1.0}
+        b = {"url": "https://b.com/y", "title": "", "score": 9.0}
+        urls = [r["url"] for r in research._merge_results([[a, b]])]
+        assert urls[0] == b["url"]
+
+
+class TestPageDate:
+    def test_dossier_carries_publication_date(self):
+        pages = [({"title": "t", "content": "", "_date": "2026-08-22"},
+                  "https://x.com/a", "conteúdo")]
+        assert "Publicado em: 2026-08-22" in research._render_dossier(pages)
+
+    def test_dossier_says_when_date_unknown(self):
+        pages = [({"title": "t", "content": ""}, "https://x.com/a", "conteúdo")]
+        assert "Publicado em: data não informada" in research._render_dossier(pages)
 
 
 class TestNormalizeUrl:
@@ -413,9 +478,9 @@ class TestRejectIndex:
 
         def fake_read_many(urls, reject_index=False):
             seen["reject_index"] = reject_index
-            return ["conteúdo " + "x" * 2000 for _ in urls]
+            return [("conteúdo " + "x" * 2000, None) for _ in urls]
 
-        with patch.object(research._scraper, "read_many", side_effect=fake_read_many), \
+        with patch.object(research._scraper, "read_many_dated", side_effect=fake_read_many), \
              patch("web_search_mcp.tools.research._collect_links",
                    return_value=[{"url": "https://bg3.wiki/wiki/Gontr_Mael"}]), \
              patch("web_search_mcp.tools.research._summarize", return_value="resumo"):
@@ -451,8 +516,8 @@ class TestHubPage:
         candidates = [{"url": "https://portal.com/tecnologia/"}]
         page = self._MENU + "\n" + "x" * 1000
 
-        with patch.object(research._scraper, "read_many",
-                          side_effect=lambda urls, reject_index=False: [page]), \
+        with patch.object(research._scraper, "read_many_dated",
+                          side_effect=lambda urls, reject_index=False: [(page, None)]), \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 3), \
              patch.object(config, "RESEARCH_MAX_WAVES", 1):
             assert research._read_pages(candidates) == []

@@ -47,7 +47,10 @@ _BASE_INSTRUCTION = (
     "marcação. Copie nomes de pessoas, cargos e números exatamente como "
     "estão na fonte, sem aproximar nem fundir. Capa de portal mistura "
     "notícia do dia com reportagem antiga: só apresente como fato de hoje "
-    "o que o material datar de hoje. Ignore páginas irrelevantes ou que "
+    "o que o material datar de hoje. Cada bloco traz a data de publicação "
+    "da página: se ela for anterior ao período que a pergunta pede, diga "
+    "que o dado é daquela data em vez de apresentá-lo como atual. "
+    "Ignore páginas irrelevantes ou que "
     "falharam. Nunca invente nada: se o material não responder, diga "
     "exatamente o que faltou. Não copie o conteúdo bruto das páginas. Se a "
     "pergunta for ampla, priorize COBERTURA sobre profundidade: mais itens "
@@ -210,10 +213,10 @@ def _collect_links(query: str, recent: bool) -> list[dict]:
         per_query = []
     per_query.insert(0, original_results)
 
-    return _merge_results(per_query)
+    return _merge_results(per_query, query)
 
 
-def _merge_results(per_query: list[list[dict]]) -> list[dict]:
+def _merge_results(per_query: list[list[dict]], query: str = "") -> list[dict]:
     """Mescla os resultados das várias buscas, melhores primeiro.
 
     Round-robin (1º de cada busca, depois o 2º de cada) reparte o orçamento
@@ -244,12 +247,35 @@ def _merge_results(per_query: list[list[dict]]) -> list[dict]:
         for key in {_normalize_url(r["url"]) for r in results if r.get("url")}:
             agreement[key] = agreement.get(key, 0) + 1
 
-    def rank(r: dict) -> tuple[int, float]:
+    # Candidato que não compartilha NENHUMA palavra de conteúdo com a
+    # pergunta vai para o fim da fila. Quando o motor de busca não acha o
+    # termo procurado, ele casa a frase pela palavra funcional e devolve
+    # verbete de dicionário: medido em 29/08/2026, com 12 dos 14 motores
+    # suspensos, "Qual a melhor estratégia contra Ketheric Thorm" trouxe
+    # dicio.com.br/qual, linguee/best e onthisday.com, e "Como enfrentar o
+    # último chefão em The Witcher 3" trouxe o Como 1907 (time italiano) —
+    # nenhum deles tem um único token da pergunta no título ou na URL,
+    # enquanto thewitcher.com/br/pt-br e gamerant/.../ketheric-thorm têm.
+    # É demoção, não descarte: o candidato ainda serve de reserva se nada
+    # melhor sobrar, e a regra é léxica — vale para qualquer tema e idioma.
+    q_tokens = _content_tokens(query) if query else frozenset()
+
+    def overlaps(r: dict) -> bool:
+        if not q_tokens:
+            return True
+        text = f"{r.get('title', '')} {r.get('url', '')}"
+        return bool(q_tokens & _content_tokens(text))
+
+    def rank(r: dict) -> tuple[bool, int, float]:
         try:
             score = float(r.get("score") or 0)
         except (TypeError, ValueError):
             score = 0.0
-        return -agreement.get(_normalize_url(r.get("url", "")), 0), -score
+        return (
+            not overlaps(r),
+            -agreement.get(_normalize_url(r.get("url", "")), 0),
+            -score,
+        )
 
     ranked = [sorted(results, key=rank) for results in per_query]
 
@@ -259,23 +285,36 @@ def _merge_results(per_query: list[list[dict]]) -> list[dict]:
     merged: list[dict] = []
     seen: set[str] = set()
     per_domain: dict[str, int] = {}
-    for i in range(_search.max_results):
-        for results in ranked:
-            if i >= len(results):
-                continue
-            url = results[i].get("url", "")
-            key = _normalize_url(url)
-            if not url or key in seen:
-                continue
-            domain = urlsplit(url).netloc.lower()
-            if (
-                config.RESEARCH_MAX_PER_DOMAIN
-                and per_domain.get(domain, 0) >= config.RESEARCH_MAX_PER_DOMAIN
-            ):
-                continue
-            merged.append(results[i])
-            seen.add(key)
-            per_domain[domain] = per_domain.get(domain, 0) + 1
+
+    def collect(accept) -> None:
+        for i in range(_search.max_results):
+            for results in ranked:
+                if i >= len(results):
+                    continue
+                url = results[i].get("url", "")
+                key = _normalize_url(url)
+                if not url or key in seen or not accept(results[i]):
+                    continue
+                domain = urlsplit(url).netloc.lower()
+                if (
+                    config.RESEARCH_MAX_PER_DOMAIN
+                    and per_domain.get(domain, 0) >= config.RESEARCH_MAX_PER_DOMAIN
+                ):
+                    continue
+                merged.append(results[i])
+                seen.add(key)
+                per_domain[domain] = per_domain.get(domain, 0) + 1
+
+    # Duas passadas: primeiro tudo que compartilha palavra com a pergunta,
+    # depois o resto como reserva. Ordenar só DENTRO de cada busca não basta
+    # — o round-robin pega o 1º de cada uma, então uma busca que só devolveu
+    # lixo emplaca o lixo dela na frente do 2º resultado bom de outra busca.
+    # Medido em 29/08/2026: com a demoção só intra-busca, sobraram no dossiê
+    # customerservice.costco.com (pergunta sobre Baldur's Gate 3), passagem
+    # de ônibus e previsão de Taubaté (pergunta sobre Florianópolis) e o
+    # verbete "alguma" do Dicio (pergunta sobre um modelo de IA).
+    collect(overlaps)
+    collect(lambda r: not overlaps(r))
     return merged[: config.RESEARCH_POOL_SIZE]
 
 
@@ -394,8 +433,9 @@ def _read_pages(
             break
         remaining = budget - len(pages_read)
         batch, queue = queue[:remaining], queue[remaining:]
-        pages = _scraper.read_many([u for _, u in batch], reject_index=True)
-        for (r, url), page in zip(batch, pages):
+        pages = _scraper.read_many_dated([u for _, u in batch], reject_index=True)
+        for (r, url), (page, page_date) in zip(batch, pages):
+            r["_date"] = page_date
             if WebScraper.unusable(page):
                 logger.error(
                     "_read_pages: onda %d, descartada url=%s (%d chars) motivo=%s",
@@ -432,6 +472,7 @@ def _render_dossier(pages_read: list[tuple[dict, str, str]]) -> str:
         f"===== FONTE [{i}] =====\n"
         f"Título: {r.get('title', '').strip()}\n"
         f"URL: {url}\n"
+        f"Publicado em: {r.get('_date') or 'data não informada'}\n"
         f"Resumo da busca: {r.get('content', '').strip()}\n"
         f"Conteúdo da página:\n{page}"
         for i, (r, url, page) in enumerate(pages_read, 1)

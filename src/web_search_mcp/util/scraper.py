@@ -125,6 +125,38 @@ class WebScraper:
         self.limit = limit
         self.timeout = timeout
 
+    def read_many_dated(
+        self, urls: list[str], reject_index: bool = False
+    ) -> list[tuple[str, str | None]]:
+        """read_many + a data de publicação de cada página, quando houver.
+
+        Quem monta dossiê precisa da data: sem ela, matéria velha entra como
+        se fosse de hoje. Medido: "previsão do tempo para os próximos 5 dias"
+        trouxe uma matéria publicada uma semana antes e o resumo apresentou
+        os dias 23-26 como sendo os próximos — errado, e sem nenhum sinal de
+        que era material vencido.
+        """
+        if not urls:
+            return []
+        with ThreadPoolExecutor(max_workers=len(urls)) as pool:
+            downloaded = list(pool.map(self._download, urls))
+        out: list[tuple[str, str | None]] = []
+        for ok, html in downloaded:
+            if not ok:
+                out.append((html, None))
+                continue
+            out.append((self._extract(html, reject_index), self._page_date(html)))
+        return out
+
+    @staticmethod
+    def _page_date(html: str) -> str | None:
+        """Data de publicação declarada pela página (YYYY-MM-DD), se houver."""
+        try:
+            meta = trafilatura.extract_metadata(html)
+        except Exception:  # metadados malformados não podem derrubar a leitura
+            return None
+        return getattr(meta, "date", None) if meta else None
+
     def read_many(self, urls: list[str], reject_index: bool = False) -> list[str]:
         """Lê várias URLs: download em paralelo, extração serial.
 
