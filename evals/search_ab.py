@@ -43,7 +43,9 @@ _ALL = QUESTIONS + _EXTRA
 
 def _on_topic(query: str, results: list[dict]) -> int:
     """Resultados que têm alguma palavra de conteúdo da pergunta no título
-    ou na URL — o mesmo critério léxico do _merge_results."""
+    ou na URL. Métrica aproximada: página certa com título em outras palavras
+    conta como fora (medido em 10/09/2026 no google cse: bcb.gov.br/conversao
+    para cotação do dólar, auth0 para OAuth2)."""
     tokens = frozenset(t for t in research._content_tokens(query) if len(t) > 1)
     return sum(
         1 for r in results

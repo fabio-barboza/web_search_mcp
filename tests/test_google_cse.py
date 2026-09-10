@@ -206,6 +206,15 @@ class TestFailover:
         client.reset_health()
         assert client.health() == {}
 
+    def test_four_channels_retry_on_three_distinct(self):
+        """Com canais sobrando, as três tentativas Tor saem de canais
+        diferentes em vez de voltar ao primeiro."""
+        pool = ChannelPool([TorChannel(f"tor-{x}", "127.0.0.1", 1, 2) for x in "abcd"])
+        client = GoogleCSE(pool, cx="cx1", hl="pt-BR", timeout=5, direct_fallback=True, max_results=10)
+        fake = FakeGoogle(_tor_blocked)
+        _run(client, fake, "q")
+        assert fake.vias == ["tor-a#0", "tor-b#0", "tor-c#0", "direto"]
+
     def test_no_direct_fallback(self):
         fake = FakeGoogle(lambda via, p: _resp(BLOCKED))
         with pytest.raises(GoogleUnavailable):

@@ -111,7 +111,7 @@ if SEARCH_BACKEND not in ("google_tor", "searxng"):
     raise ValueError(f"SEARCH_BACKEND={SEARCH_BACKEND!r}: use google_tor ou searxng")
 
 TOR_CHANNELS = _parse_tor_channels(
-    os.getenv("TOR_CHANNELS", "127.0.0.1:9060:9061,127.0.0.1:9070:9071")
+    os.getenv("TOR_CHANNELS", "127.0.0.1:9060:9061,127.0.0.1:9070:9071,127.0.0.1:9080:9081,127.0.0.1:9090:9091")
 )
 # Vazia não quebra a busca: sem ela o NEWNYM fica desligado e o canal barrado
 # troca de circuito só pela credencial SOCKS nova (IsolateSOCKSAuth), que já

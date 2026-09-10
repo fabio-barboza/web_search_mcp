@@ -126,6 +126,18 @@ class TestChannelPool:
         b.renew()
         assert pool.other(a) is c
 
+    def test_other_starts_at_neighbour_not_first(self):
+        """Com quatro canais, o failover não pode cair sempre no tor-a."""
+        chans = [_channel(f"tor-{x}") for x in "abcd"]
+        pool = ChannelPool(chans)
+        assert [pool.other(c).name for c in chans] == ["tor-b", "tor-c", "tor-d", "tor-a"]
+
+    def test_other_excludes(self):
+        a, b, c = _channel("tor-a"), _channel("tor-b"), _channel("tor-c")
+        pool = ChannelPool([a, b, c])
+        assert pool.other(a, exclude=(b,)) is c
+        assert ChannelPool([a, b]).other(a, exclude=(b,)) is None
+
     def test_other_with_single_channel(self):
         a = _channel()
         assert ChannelPool([a]).other(a) is None

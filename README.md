@@ -72,6 +72,8 @@ Sobe:
 | `searxng` + `valkey` | `8886` | SearXNG com `search-engine/searxng/settings.yml` montado por cima (JSON habilitado e curadoria de fontes já prontos) |
 | `tor-a` | `127.0.0.1:9060` SOCKS, `9061` controle | canal de busca via Tor ([`plans/tor.md`](plans/tor.md)) |
 | `tor-b` | `127.0.0.1:9070` SOCKS, `9071` controle | segundo canal, independente do primeiro |
+| `tor-c` | `127.0.0.1:9080` SOCKS, `9081` controle | terceiro canal |
+| `tor-d` | `127.0.0.1:9090` SOCKS, `9091` controle | quarto canal |
 | `mcp-searxng` + `caddy` | `8887` | servidor MCP de busca de terceiros, independente deste projeto (ver abaixo) |
 
 Os containers Tor leem o **mesmo `.env` da raiz** que configura o MCP
@@ -317,7 +319,7 @@ o aviso de busca degradada. Ninguém espera em nenhum passo.
 | Variável | Default | O que faz |
 |---|---|---|
 | `SEARCH_BACKEND` | `google_tor` | `google_tor` (Google CSE pelos canais Tor, com CSE direto e SearXNG de reserva) ou `searxng` (só o SearXNG, como antes). Rollback é trocar e reiniciar |
-| `TOR_CHANNELS` | `127.0.0.1:9060:9061,127.0.0.1:9070:9071` | Um canal por item, `host:porta_socks:porta_controle`, separados por vírgula. O default bate com os `tor-a`/`tor-b` do `search-engine/` |
+| `TOR_CHANNELS` | `127.0.0.1:9060:9061,127.0.0.1:9070:9071,127.0.0.1:9080:9081,127.0.0.1:9090:9091` | Um canal por item, `host:porta_socks:porta_controle`, separados por vírgula. O default bate com os `tor-a`/`tor-b` do `search-engine/` |
 | `TOR_CONTROL_PASSWORD` | *(vazio)* | Senha do ControlPort, para o `NEWNYM`. Os containers Tor não sobem sem ela; o MCP sim — vazia só desliga o `NEWNYM`, e a troca de circuito pela credencial SOCKS continua funcionando |
 | `GOOGLE_CSE_CX` | CX público do blackle.com | Qual CSE consultar. Troque por um CX seu sem mexer no código |
 | `GOOGLE_CSE_HL` | `pt-BR` | Idioma da interface do CSE. Não restringe o idioma dos resultados |

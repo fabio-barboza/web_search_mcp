@@ -1,11 +1,13 @@
 # Infraestrutura de busca do web_search_mcp. Numa cópia nova do repo:
 #   cp .env.example .env
 #   cd search-engine && docker compose up -d
-# e rode o MCP. Sobe o SearXNG (searxng/) e os dois canais Tor (tor/).
+# e rode o MCP. Sobe o SearXNG (searxng/) e os quatro canais Tor (tor/).
 
-# Canal de busca via Tor (plans/tor.md). tor-a e tor-b são idênticos: o
-# research_web alterna as queries entre os dois e, quando o Google barra um,
-# refaz a query no outro na hora enquanto o barrado troca de circuito.
+# Canal de busca via Tor (plans/tor.md). tor-a..tor-d são idênticos: o
+# research_web alterna as queries entre eles e, quando o Google barra um,
+# refaz a query no próximo na hora enquanto o barrado troca de circuito.
+# Quatro porque cada canal atende 2-3 consultas simultâneas e uma pesquisa
+# dispara 5 (medido em 10/09/2026: busca p50 9,7 s com dois canais).
 x-tor: &tor
   build: ./tor
   image: web-search-tor:0.4.9.12
@@ -150,6 +152,24 @@ services:
     volumes:
       - tor-b-data:/var/lib/tor
 
+  tor-c:
+    <<: *tor
+    container_name: tor-c
+    ports:
+      - "127.0.0.1:9080:9050"   # SOCKS
+      - "127.0.0.1:9081:9051"   # controle
+    volumes:
+      - tor-c-data:/var/lib/tor
+
+  tor-d:
+    <<: *tor
+    container_name: tor-d
+    ports:
+      - "127.0.0.1:9090:9050"   # SOCKS
+      - "127.0.0.1:9091:9051"   # controle
+    volumes:
+      - tor-d-data:/var/lib/tor
+
 networks:
   searxng:
     driver: bridge
@@ -159,3 +179,5 @@ volumes:
   caddy-data:
   tor-a-data:
   tor-b-data:
+  tor-c-data:
+  tor-d-data:

@@ -240,7 +240,7 @@ which one it has. Pages are still read directly, never through Tor.
 
 Docker compose stack for the search infrastructure the server depends on.
 `search-engine/docker-compose.yaml` brings up SearXNG (`search-engine/searxng/`)
-and the two Tor search channels `tor-a`/`tor-b` (`search-engine/tor/`, see
+and the four Tor search channels `tor-a`..`tor-d` (`search-engine/tor/`, see
 `plans/tor.md`). A fresh clone runs with:
 
 ```bash
@@ -265,7 +265,7 @@ SearXNG writes.
 The *live* deployment on this machine lives outside the repo:
 `/home/fabio/services/searxng` (own compose, config at `data/settings.yml`,
 editable from the host; `docker restart searxng` after edits) and
-`/home/fabio/services/tor` (tor-a/tor-b only, password in its own `.env`,
+`/home/fabio/services/tor` (tor-a..tor-d only, password in its own `.env`,
 chmod 600, same value as the production MCP's `TOR_CONTROL_PASSWORD`).
 Changes made there should be mirrored into `search-engine/` and vice-versa.
 Never bring up the repo's compose on this machine alongside the live ones:

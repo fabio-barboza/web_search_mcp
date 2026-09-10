@@ -1,6 +1,6 @@
 """Canais Tor da busca (plans/tor.md).
 
-Cada canal é um container tor independente (tor-a, tor-b). O que troca o IP
+Cada canal é um container tor independente (tor-a..tor-d). O que troca o IP
 de saída na hora é a credencial SOCKS: os containers rodam com
 IsolateSOCKSAuth, então usuário/senha novos = circuito novo, sem esperar
 nada. O SIGNAL NEWNYM pelo ControlPort é só reforço — o tor ignora o
@@ -142,9 +142,16 @@ class ChannelPool:
             self._next += 1
             return channel
 
-    def other(self, channel: TorChannel) -> TorChannel | None:
-        """Outro canal para o failover, saudável de preferência."""
-        rest = [c for c in self.channels if c is not channel]
+    def other(self, channel: TorChannel, exclude: tuple[TorChannel, ...] = ()) -> TorChannel | None:
+        """Outro canal para o failover, saudável de preferência.
+
+        Começa pelo vizinho de `channel` no rodízio, não pelo primeiro da
+        lista: com quatro canais, "o primeiro saudável" mandaria todo
+        failover para o tor-a, que já é o canal da vez de 1/4 das queries.
+        """
+        i = self.channels.index(channel) if channel in self.channels else -1
+        after = self.channels[i + 1:] + self.channels[:i + 1]
+        rest = [c for c in after if c is not channel and c not in exclude]
         if not rest:
             return None
         return ([c for c in rest if c.healthy()] or rest)[0]

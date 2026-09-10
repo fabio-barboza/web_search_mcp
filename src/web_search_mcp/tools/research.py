@@ -215,7 +215,7 @@ def _collect_links(query: str, recent: bool) -> list[dict]:
         per_query = []
     per_query.insert(0, original_results)
 
-    return _merge_results(per_query, query)
+    return _merge_results(per_query)
 
 
 def _search_health_note(results: list[dict]) -> str:
@@ -250,7 +250,7 @@ def _search_health_note(results: list[dict]) -> str:
     )
 
 
-def _merge_results(per_query: list[list[dict]], query: str = "") -> list[dict]:
+def _merge_results(per_query: list[list[dict]]) -> list[dict]:
     """Mescla os resultados das várias buscas, melhores primeiro.
 
     Round-robin (1º de cada busca, depois o 2º de cada) reparte o orçamento
@@ -281,45 +281,20 @@ def _merge_results(per_query: list[list[dict]], query: str = "") -> list[dict]:
         for key in {_normalize_url(r["url"]) for r in results if r.get("url")}:
             agreement[key] = agreement.get(key, 0) + 1
 
-    # Candidato que não compartilha NENHUMA palavra de conteúdo com a
-    # pergunta vai para o fim da fila. Quando o motor de busca não acha o
-    # termo procurado, ele casa a frase pela palavra funcional e devolve
-    # verbete de dicionário: medido em 29/08/2026, com 12 dos 14 motores
-    # suspensos, "Qual a melhor estratégia contra Ketheric Thorm" trouxe
-    # dicio.com.br/qual, linguee/best e onthisday.com, e "Como enfrentar o
-    # último chefão em The Witcher 3" trouxe o Como 1907 (time italiano) —
-    # nenhum deles tem um único token da pergunta no título ou na URL,
-    # enquanto thewitcher.com/br/pt-br e gamerant/.../ketheric-thorm têm.
-    # É demoção, não descarte: o candidato ainda serve de reserva se nada
-    # melhor sobrar, e a regra é léxica — vale para qualquer tema e idioma.
-    #
-    # Token de 1 caractere não conta aqui: "3" de "Act 3" e o "s" de
-    # "Baldur's" casam com qualquer URL que tenha um número ou um plural, e
-    # foi assim que outlook.live.com/mail/3 passou por "do assunto" numa
-    # pergunta sobre um jogo (10/09/2026). Só aqui — o anti-repetição usa
-    # _content_tokens inteiro, porque lá "Python 2" e "Python 3" têm que
-    # continuar sendo perguntas diferentes.
-    q_tokens = (
-        frozenset(t for t in _content_tokens(query) if len(t) > 1)
-        if query else frozenset()
-    )
-
-    def overlaps(r: dict) -> bool:
-        if not q_tokens:
-            return True
-        text = f"{r.get('title', '')} {r.get('url', '')}"
-        return bool(q_tokens & _content_tokens(text))
-
-    def rank(r: dict) -> tuple[bool, int, float]:
+    # Sem demoção léxica (candidato sem palavra da pergunta no título/URL ia
+    # para o fim). Ela existia para o SearXNG com 12 de 14 motores suspensos,
+    # que casava a frase pela palavra funcional e devolvia verbete de
+    # dicionário. No Google CSE ela só errava: medido em 10/09/2026, mesmos
+    # resultados crus de 12 perguntas sem relação entre si, o top-5 mudou em
+    # 3 e nas 3 para pior — rebaixou bcb.gov.br/conversao (cotação do
+    # dólar), auth0 (OAuth2), paper do Raft no arxiv e guia de BG3 no
+    # reddit, páginas certas cujo título usa outras palavras.
+    def rank(r: dict) -> tuple[int, float]:
         try:
             score = float(r.get("score") or 0)
         except (TypeError, ValueError):
             score = 0.0
-        return (
-            not overlaps(r),
-            -agreement.get(_normalize_url(r.get("url", "")), 0),
-            -score,
-        )
+        return (-agreement.get(_normalize_url(r.get("url", "")), 0), -score)
 
     ranked = [sorted(results, key=rank) for results in per_query]
 
@@ -329,36 +304,23 @@ def _merge_results(per_query: list[list[dict]], query: str = "") -> list[dict]:
     merged: list[dict] = []
     seen: set[str] = set()
     per_domain: dict[str, int] = {}
-
-    def collect(accept) -> None:
-        for i in range(_search.max_results):
-            for results in ranked:
-                if i >= len(results):
-                    continue
-                url = results[i].get("url", "")
-                key = _normalize_url(url)
-                if not url or key in seen or not accept(results[i]):
-                    continue
-                domain = urlsplit(url).netloc.lower()
-                if (
-                    config.RESEARCH_MAX_PER_DOMAIN
-                    and per_domain.get(domain, 0) >= config.RESEARCH_MAX_PER_DOMAIN
-                ):
-                    continue
-                merged.append(results[i])
-                seen.add(key)
-                per_domain[domain] = per_domain.get(domain, 0) + 1
-
-    # Duas passadas: primeiro tudo que compartilha palavra com a pergunta,
-    # depois o resto como reserva. Ordenar só DENTRO de cada busca não basta
-    # — o round-robin pega o 1º de cada uma, então uma busca que só devolveu
-    # lixo emplaca o lixo dela na frente do 2º resultado bom de outra busca.
-    # Medido em 29/08/2026: com a demoção só intra-busca, sobraram no dossiê
-    # customerservice.costco.com (pergunta sobre Baldur's Gate 3), passagem
-    # de ônibus e previsão de Taubaté (pergunta sobre Florianópolis) e o
-    # verbete "alguma" do Dicio (pergunta sobre um modelo de IA).
-    collect(overlaps)
-    collect(lambda r: not overlaps(r))
+    for i in range(_search.max_results):
+        for results in ranked:
+            if i >= len(results):
+                continue
+            url = results[i].get("url", "")
+            key = _normalize_url(url)
+            if not url or key in seen:
+                continue
+            domain = urlsplit(url).netloc.lower()
+            if (
+                config.RESEARCH_MAX_PER_DOMAIN
+                and per_domain.get(domain, 0) >= config.RESEARCH_MAX_PER_DOMAIN
+            ):
+                continue
+            merged.append(results[i])
+            seen.add(key)
+            per_domain[domain] = per_domain.get(domain, 0) + 1
     return merged[: config.RESEARCH_POOL_SIZE]
 
 
@@ -588,10 +550,8 @@ _STOPWORDS = frozenset((
     "the a an of in on at to for from by with about and or what which "
     "who how when where is are was were be been do does did "
     # Verbos e pronomes de função: aparecem na pergunta inteira em linguagem
-    # natural e não dizem nada sobre o assunto. Sem eles, "Tem como adicionar
-    # um usuário no tailscale mas limitar as portas?" casava com páginas de
-    # gramática sobre "tem ou têm" — e o casamento em "tem" fazia a demoção
-    # lexical aceitá-las como se fossem do assunto (medido em 29/08/2026).
+    # natural e não dizem nada sobre o assunto — "Tem como limitar X?" e
+    # "Posso limitar X?" são a mesma pergunta para o anti-repetição.
     "tem tenho temos ter tinha pode posso podem podemos poder podia deve "
     "devo devem dever preciso precisa precisam vai vou vamos vao vão "
     "eu ele ela eles elas voce você nos nós lhe dele dela isto aquele aquela "

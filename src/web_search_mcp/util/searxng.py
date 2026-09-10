@@ -32,12 +32,8 @@ class SearXNG:
         quando a pergunta pedir dado recente.
 
         Devolve TUDO que o SearXNG mandou, sem cortar em max_results: o corte
-        é de quem ranqueia (_merge_results), depois de pôr na frente o que é
-        do assunto. Cortar aqui, na ordem crua do SearXNG, deixava um motor
-        quebrado expulsar o resultado bom — medido em 10/09/2026: o bing
-        devolvia outlook.live.com e jurisprudência da Louisiana nas 10
-        primeiras posições, e o bg3.wiki que o google cse achou vinha
-        depois e nunca chegava ao ranking.
+        é de quem ranqueia (_merge_results), depois de ordenar por
+        concordância entre buscas e score.
         """
         params = {
             "q": query,

@@ -1,4 +1,4 @@
-# Um canal de busca. O mesmo arquivo serve para tor-a e tor-b; o que os torna
+# Um canal de busca. O mesmo arquivo serve para tor-a..tor-d; o que os torna
 # canais independentes é o DataDirectory de cada um (volumes separados =
 # guard nodes diferentes).
 

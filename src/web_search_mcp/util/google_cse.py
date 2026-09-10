@@ -126,7 +126,11 @@ class GoogleCSE:
         route: list[TorChannel | None] = []
         first = self.pool.pick()
         if first is not None:
-            route = [first, self.pool.other(first) or first, first]
+            # Três tentativas Tor em canais distintos quando há canais para
+            # isso; com dois, a terceira volta ao primeiro, já renovado.
+            second = self.pool.other(first) or first
+            third = self.pool.other(first, exclude=(second,)) or first
+            route = [first, second, third]
         if self.direct_fallback:
             route.append(None)
 

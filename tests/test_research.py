@@ -236,74 +236,6 @@ class TestMergeResults:
         assert len(urls) == 3
 
 
-class TestLexicalDemotion:
-    """Candidato sem token de conteúdo em comum com a pergunta vai ao fim.
-
-    Corpus de temas não relacionados e os dois desfechos: o que precisa
-    afundar E o que precisa continuar em cima.
-    """
-
-    @pytest.mark.parametrize("query,bom,ruim", [
-        (
-            "Como enfrentar o ultimo chefão em The Witcher 3?",
-            {"url": "https://www.thewitcher.com/br/pt-br", "title": "The Witcher"},
-            {"url": "https://en.wikipedia.org/wiki/Como_1907", "title": "Como 1907"},
-        ),
-        (
-            "Qual a melhor estratégia contra Ketheric Thorm?",
-            {"url": "https://gamerant.com/bg3-ketheric-thorm-guide/", "title": "Ketheric"},
-            {"url": "https://www.dicio.com.br/qual/", "title": "Qual - Dicio"},
-        ),
-        (
-            "Quando sai o próximo lançamento do telescópio James Webb?",
-            {"url": "https://nasa.gov/webb/launch", "title": "James Webb telescope"},
-            {"url": "https://www.onthisday.com/today/birthdays.php", "title": "Birthdays"},
-        ),
-    ])
-    def test_unrelated_candidate_sinks(self, query, bom, ruim):
-        # O ruim entra com score maior de propósito: a demoção tem que
-        # vencer o score, senão o lixo continua ocupando vaga.
-        ruim = {**ruim, "score": 9.0}
-        bom = {**bom, "score": 0.1}
-        urls = [r["url"] for r in research._merge_results([[ruim, bom]], query)]
-        assert urls.index(bom["url"]) < urls.index(ruim["url"])
-        # Demoção, não descarte: o candidato segue disponível como reserva.
-        assert ruim["url"] in urls
-
-    def test_junk_only_query_does_not_take_a_front_slot(self):
-        """Round-robin não pode dar a vaga do 1º lugar a uma busca que só
-        devolveu lixo: o 2º resultado bom de outra busca vem antes."""
-        boa = [
-            {"url": "https://bg3.wiki/wiki/Ketheric_Thorm/Combat", "title": "Ketheric"},
-            {"url": "https://gamespot.com/baldurs-gate-3-ketheric-guide/", "title": "Ketheric guide"},
-        ]
-        lixo = [{"url": "https://customerservice.costco.com/return-policy", "title": "Return policy"}]
-        urls = [r["url"] for r in research._merge_results(
-            [boa, lixo], "Qual a melhor estratégia contra Ketheric Thorm em Baldur's Gate 3?")]
-        assert urls[:2] == [boa[0]["url"], boa[1]["url"]]
-        assert urls[2] == lixo[0]["url"]
-
-    def test_good_result_past_max_results_is_not_lost(self):
-        """Motor quebrado enchendo as primeiras posições não pode expulsar o
-        resultado bom que veio depois delas: o corte em max_results é feito
-        depois do ranking. Medido em 10/09/2026 com bing: 10 posições de
-        outlook.live.com na frente do bg3.wiki que o google cse achou."""
-        lixo = [
-            {"url": f"https://outlook.live.com/mail/{i}", "title": "Outlook", "score": 1.0}
-            for i in range(research._search.max_results)
-        ]
-        bom = {"url": "https://bg3.wiki/wiki/Sorcerous_Vault", "title": "Sorcerous Vault", "score": 1.0}
-        urls = [r["url"] for r in research._merge_results(
-            [lixo + [bom]], "Baldur's Gate 3 Sorcerous Vault door")]
-        assert urls[0] == bom["url"]
-
-    def test_no_query_keeps_previous_order(self):
-        a = {"url": "https://a.com/x", "title": "", "score": 1.0}
-        b = {"url": "https://b.com/y", "title": "", "score": 9.0}
-        urls = [r["url"] for r in research._merge_results([[a, b]])]
-        assert urls[0] == b["url"]
-
-
 class TestPageDate:
     def test_dossier_carries_publication_date(self):
         pages = [({"title": "t", "content": "", "_date": "2026-08-22"},
@@ -614,7 +546,7 @@ class TestSearchHealthNote:
 
 
 class TestFunctionWordsAreNotSubject:
-    """Palavra de função não pode servir de prova de que a página é do tema.
+    """Palavra de função não distingue uma pergunta de outra (anti-repetição).
 
     Corpus de assuntos não relacionados, nos DOIS desfechos: o token de
     função some, o token de assunto fica.
@@ -639,16 +571,3 @@ class TestFunctionWordsAreNotSubject:
     ])
     def test_assunto_fica(self, query, esperado_dentro):
         assert esperado_dentro in research._content_tokens(query)
-
-    def test_gramatica_deixa_de_casar_com_pergunta_de_rede(self):
-        q = research._content_tokens(
-            "Tem como adicionar um usuário no tailscale mas limitar as portas?"
-        )
-        gramatica = research._content_tokens(
-            "Tem ou têm? Qual é o certo? - Português"
-        )
-        doc = research._content_tokens(
-            "Tailscale ACL: restrict ports per user - policy file"
-        )
-        assert not (q & gramatica)
-        assert q & doc
