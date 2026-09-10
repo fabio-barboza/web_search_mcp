@@ -33,10 +33,11 @@ class TestSearch:
         params = get.call_args.kwargs["params"]
         assert params["time_range"] == "day"
 
-    def test_truncates_to_max_results(self):
+    def test_does_not_truncate_before_ranking(self):
+        # O corte em max_results é do _merge_results, depois do ranking.
         client = SearXNG(max_results=2)
         results = [{"url": f"http://x.com/{i}"} for i in range(10)]
         with patch("web_search_mcp.util.searxng.requests.get", return_value=_mock_response(results)):
             out = client.search("qualquer coisa")
 
-        assert len(out) == 2
+        assert len(out) == 10

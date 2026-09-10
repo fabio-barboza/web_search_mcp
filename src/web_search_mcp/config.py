@@ -68,8 +68,66 @@ EXTRA_SYSTEM_PROMPT = os.getenv("EXTRA_SYSTEM_PROMPT", "").strip()
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8886")
 SEARXNG_MAX_RESULTS = int(os.getenv("SEARXNG_MAX_RESULTS", "10"))
 SEARXNG_TIMEOUT = int(os.getenv("SEARXNG_TIMEOUT", "10"))
-SEARXNG_LANGUAGE = os.getenv("SEARXNG_LANGUAGE", "pt-BR")
+# "auto": o SearXNG detecta o idioma pelo texto da própria query. Fixar
+# pt-BR empurrava toda busca para página brasileira, inclusive as queries em
+# inglês que _generate_queries produz — medido em 10/09/2026 no google cse,
+# 6 assuntos sem relação entre si (Python, Raft, vitamina B12, BG3,
+# Tailscale, pão de fermentação natural): pt-BR 24/51 resultados com o
+# assunto no título/URL, auto 46/60. As queries em português ficaram iguais.
+SEARXNG_LANGUAGE = os.getenv("SEARXNG_LANGUAGE", "auto")
 SEARXNG_CATEGORIES = os.getenv("SEARXNG_CATEGORIES", "general,news")  # string, vai direto no param
+
+# --- Fonte de links: Google CSE via Tor (plans/tor.md) ---
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on", "sim")
+
+
+def _parse_tor_channels(raw: str) -> list[tuple[str, int, int]]:
+    """"host:socks:controle,host:socks:controle" -> [(host, socks, controle)]."""
+    channels = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            host, socks_port, control_port = item.rsplit(":", 2)
+            channels.append((host, int(socks_port), int(control_port)))
+        except ValueError as e:
+            raise ValueError(
+                f"TOR_CHANNELS: {item!r} não está no formato host:porta_socks:porta_controle"
+            ) from e
+    return channels
+
+
+# google_tor: Google CSE pelos canais Tor, com CSE direto e SearXNG de
+# reserva. searxng: só o SearXNG, como antes — rollback é trocar e reiniciar.
+SEARCH_BACKEND = os.getenv("SEARCH_BACKEND", "google_tor").strip().lower()
+if SEARCH_BACKEND not in ("google_tor", "searxng"):
+    raise ValueError(f"SEARCH_BACKEND={SEARCH_BACKEND!r}: use google_tor ou searxng")
+
+TOR_CHANNELS = _parse_tor_channels(
+    os.getenv("TOR_CHANNELS", "127.0.0.1:9060:9061,127.0.0.1:9070:9071,127.0.0.1:9080:9081,127.0.0.1:9090:9091")
+)
+# Vazia não quebra a busca: sem ela o NEWNYM fica desligado e o canal barrado
+# troca de circuito só pela credencial SOCKS nova (IsolateSOCKSAuth), que já
+# basta. Os containers do search-engine/ é que não sobem sem ela.
+TOR_CONTROL_PASSWORD = os.getenv("TOR_CONTROL_PASSWORD", "")
+
+# CX público do blackle.com, o mesmo do motor google cse do SearXNG.
+GOOGLE_CSE_CX = os.getenv("GOOGLE_CSE_CX", "partner-pub-8993703457585266:4862972284")
+# Idioma da interface, não do resultado: sem `lr`, nada restringe a língua das
+# páginas (mesma lição do SEARXNG_LANGUAGE=auto acima).
+GOOGLE_CSE_HL = os.getenv("GOOGLE_CSE_HL", "pt-BR")
+# Por requisição. Medido em 10/09/2026, 8 circuitos novos: 2-4 s por
+# requisição via Tor, contando a montagem do circuito.
+GOOGLE_CSE_TIMEOUT = int(os.getenv("GOOGLE_CSE_TIMEOUT", "15"))
+GOOGLE_CSE_DIRECT_FALLBACK = _env_bool("GOOGLE_CSE_DIRECT_FALLBACK", True)
+SEARXNG_FALLBACK = _env_bool("SEARXNG_FALLBACK", True)
 
 # --- Scraper ---
 

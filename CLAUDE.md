@@ -124,6 +124,7 @@ cp .env.example .env                 # local config: SEARXNG_URL, MODEL_BASE_URL
 
 uv run web-search-mcp                # run server, stdio transport
 uv run web-search-mcp --http         # run server, streamable-http (uvicorn)
+./start.sh                           # search-engine/ stack + MCP --http; Ctrl+C stops all
 
 uv run --group test pytest           # full test suite (deterministic, mocks network + LLM)
 uv run --group test pytest tests/test_research.py::test_name  # single test
@@ -147,8 +148,9 @@ analysis; per-page char budget = dossier budget split across the URLs.
 Pipeline in `tools/research.py::research_web`:
 1. `_collect_links` — generates 3 search-query variants via LLM
    (`_generate_queries`), runs the original query + variants in parallel
-   against SearXNG (`util/searxng.py`), merges results ranked by
-   cross-query agreement first, then SearXNG score (`_merge_results`).
+   against the search source (`_search`: Google CSE over Tor with SearXNG
+   fallback, see "Search source" below), merges results ranked by
+   cross-query agreement first, then result score (`_merge_results`).
 2. `_read_pages` — downloads/extracts candidates in waves
    (`RESEARCH_MAX_WAVES`) until `RESEARCH_PAGE_BUDGET` usable pages are
    collected or the char budget (`_dossier_char_budget`, derived from
@@ -163,8 +165,13 @@ Pipeline in `tools/research.py::research_web`:
 `read_url` is the plain counterpart: single URL, full text, no LLM, no
 budget truncation (`WebScraper(limit=None)`).
 
-`util/scraper.py` (`WebScraper`) downloads with a real browser UA (bare
-`Mozilla/5.0` gets 406'd by some sites), extracts main content via
+`util/scraper.py` (`WebScraper`) downloads through `curl_cffi` impersonating
+Chrome's TLS/HTTP2 fingerprint (a Chrome UA on top of `requests`' fingerprint
+still got 403 from UOL, Glassdoor, Britannica; JS challenges like Cloudflare's
+still fail — that needs a real browser). Index pages (link density ≥ 0.65) and
+hubs are *marked*, not dropped: `_read_pages` keeps them in a reserve that only
+fills leftover slots, except with `recent=True`, where they enter in rank order
+(the headline/quote/forecast of "now" lives on them). It extracts main content via
 trafilatura with a structural DOM-cleaning fallback (`_clean`) for pages
 where "main content" extraction misses short but relevant text (bios,
 headline aggregators). Blocks SSRF (private/loopback/link-local IPs,
@@ -202,21 +209,69 @@ clone, `.env` at the repo root is picked up normally.
 local-only. Don't suggest binding `0.0.0.0` without flagging that it exposes
 unauthenticated scraping/LLM-proxying to the whole network.
 
-## searxng/
+## Search source: Google CSE over Tor
 
-Docker compose stack for a local SearXNG instance the server depends on.
-`searxng/settings.yml` is tracked and mounted read-only over
+`research._search` comes from `util/search_chain.py::build_search()`.
+`SEARCH_BACKEND=google_tor` (default) gives `SearchChain(GoogleCSE, SearXNG)`;
+`searxng` gives the plain `SearXNG()` (rollback). Both expose the same
+`search`/`max_results`/`health`/`reset_health`, so the pipeline never knows
+which one it has. Pages are still read directly, never through Tor.
+
+- `util/google_cse.py` calls the endpoint the CSE widget uses (the same as
+  `searx/engines/google_cse.py`); not a documented API. Token from `cse.js`,
+  cached 1 h. Only the JSON `error` field decides: `code 429` = this path is
+  blocked (arrives as HTTP 200); `code 403` = token rejected, refetch once
+  on the same path. Never scan the body for "unusual traffic": a result
+  snippet that talks about it would trigger failover — a dependency on what
+  the question is about. 200 with no `results` is "nothing found", not a
+  block.
+- Route per query, no sleep anywhere: rotation channel → the other channel
+  → the first again with a fresh credential → CSE direct from this machine
+  (`GOOGLE_CSE_DIRECT_FALLBACK`) → `GoogleUnavailable`, and `SearchChain`
+  falls back to SearXNG.
+- `util/tor.py`: a channel changes exit IP by changing its SOCKS credential
+  (containers run `IsolateSOCKSAuth`); `NEWNYM` over the ControlPort is
+  best-effort and its failure never breaks a search. `ChannelPool` rotates
+  with its own counter, so `_collect_links` passes no channel index.
+- `SearchChain.health()` is empty while Google answers; after a fallback it
+  returns SearXNG's dead engines plus `google cse`, so
+  `_search_health_note` keeps announcing degraded search with its rule
+  unchanged.
+- `uv run python -m evals.search_ab` compares SearXNG and Google side by
+  side in one session and runs a continuous-load pass (block rate per
+  channel, failovers, direct/SearXNG fallbacks). See `plans/tor.md`.
+
+## search-engine/
+
+Docker compose stack for the search infrastructure the server depends on.
+`search-engine/docker-compose.yaml` brings up SearXNG (`search-engine/searxng/`)
+and the four Tor search channels `tor-a`..`tor-d` (`search-engine/tor/`, see
+`plans/tor.md`). A fresh clone runs with:
+
+```bash
+cp .env.example .env
+(cd search-engine && docker compose up -d)
+uv run web-search-mcp
+```
+
+The Tor containers read the ROOT `.env` (`env_file: ../.env`): one file
+configures both the MCP and the stack, so `TOR_CONTROL_PASSWORD` can never
+diverge between them. Tor ports are published on 127.0.0.1 only and must stay
+that way — `0.0.0.0` would turn them into an open proxy.
+
+`search-engine/searxng/settings.yml` is tracked and mounted read-only over
 `/etc/searxng/settings.yml`, so a fresh clone boots ready: `formats: [html,
 json]` (without json, `research_web` gets 403) and a curated `hostnames:`
 block (high_priority for reference news/tech/science/games/AI sources,
 low_priority for content farms) that drives result ranking via the SearXNG
-score. `data/` stays gitignored for the runtime files SearXNG writes.
+score. `search-engine/searxng/data/` stays gitignored for the runtime files
+SearXNG writes.
 
-The *live* deployment on this machine lives outside the repo, in
+The *live* deployment on this machine lives outside the repo:
 `/home/fabio/services/searxng` (own compose, config at `data/settings.yml`,
-editable from the host; `docker restart searxng` after edits). Changes made
-there should be mirrored into the repo's `searxng/settings.yml` and
-vice-versa.
-First boot writes `searxng/data/settings.yml` (gitignored) with
-`formats: [html]` — must be hand-edited to add `json` or `research_web`'s
-`format=json` requests get a 403.
+editable from the host; `docker restart searxng` after edits) and
+`/home/fabio/services/tor` (tor-a..tor-d only, password in its own `.env`,
+chmod 600, same value as the production MCP's `TOR_CONTROL_PASSWORD`).
+Changes made there should be mirrored into `search-engine/` and vice-versa.
+Never bring up the repo's compose on this machine alongside the live ones:
+container names and ports collide.

@@ -110,8 +110,14 @@ engines:
     disabled: false
   - name: google
     disabled: false
+  # bing fora: devolve resultado de outra coisa, não pouco resultado. Medido
+  # em 10/09/2026, 6 assuntos sem relação entre si (Python, Raft, vitamina
+  # B12, BG3, Tailscale, pão de fermentação natural): 0 de 60 resultados com
+  # o assunto no título/URL — python.org para retry/backoff, jogo Raft da
+  # Steam para consenso Raft, receitafederal para receita de pão. Pior que
+  # motor suspenso: ocupa as posições da frente e empurra o resto para fora.
   - name: bing
-    disabled: false
+    disabled: true
   - name: wikipedia
     disabled: false
 

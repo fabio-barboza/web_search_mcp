@@ -1,0 +1,183 @@
+# Infraestrutura de busca do web_search_mcp. Numa cópia nova do repo:
+#   cp .env.example .env
+#   cd search-engine && docker compose up -d
+# e rode o MCP. Sobe o SearXNG (searxng/) e os quatro canais Tor (tor/).
+
+# Canal de busca via Tor (plans/tor.md). tor-a..tor-d são idênticos: o
+# research_web alterna as queries entre eles e, quando o Google barra um,
+# refaz a query no próximo na hora enquanto o barrado troca de circuito.
+# Quatro porque cada canal atende 2-3 consultas simultâneas e uma pesquisa
+# dispara 5 (medido em 10/09/2026: busca p50 9,7 s com dois canais).
+x-tor: &tor
+  build: ./tor
+  image: web-search-tor:0.4.9.12
+  restart: unless-stopped
+  # O MESMO .env da raiz que configura o MCP: dali sai o TOR_CONTROL_PASSWORD
+  # (senha do ControlPort, usada no NEWNYM), então os dois lados nunca
+  # divergem. Sem ele o compose falha na hora, em vez de subir com senha
+  # que o MCP não conhece.
+  env_file: ../.env
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: "1m"
+      max-file: "1"
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "--socks5-hostname", "127.0.0.1:9050",
+           "https://check.torproject.org/api/ip"]
+    interval: 5m
+    timeout: 30s
+    retries: 3
+    start_period: 60s
+
+services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: searxng-valkey
+    restart: unless-stopped
+    command: valkey-server --save 30 1 --loglevel warning
+    networks:
+      - searxng
+    volumes:
+      - valkey-data:/data
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8886:8080"
+    networks:
+      - searxng
+    volumes:
+      - ./searxng/data:/etc/searxng:rw
+      # Config versionada no repo, montada por cima do data/: já vem com
+      # formats json (sem ele o research_web leva 403) e a curadoria de
+      # fontes prioritárias. Sem este mount o SearXNG geraria um settings.yml
+      # padrão no primeiro boot, que precisaria de edição manual.
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8886/
+      - SEARXNG_SECRET=password123
+      - SEARXNG_REDIS_URL=redis://valkey:6379/0
+      - UWSGI_WORKERS=4
+      - UWSGI_THREADS=4
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
+    depends_on:
+      valkey:
+        condition: service_healthy
+
+  mcp-searxng:
+    image: isokoliuk/mcp-searxng:latest
+    container_name: mcp-searxng
+    restart: unless-stopped
+    stdin_open: true
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+      - MCP_HTTP_PORT=8887
+    networks:
+      - searxng
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
+    depends_on:
+      - searxng
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: searxng-caddy
+    restart: unless-stopped
+    ports:
+      - "8887:8887"
+    volumes:
+      - ./searxng/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    networks:
+      - searxng
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
+    depends_on:
+      - mcp-searxng
+
+  # Portas SÓ em 127.0.0.1: publicar em 0.0.0.0 viraria proxy aberto para a
+  # rede. Batem com TOR_CHANNELS do .env.example (host:socks:controle).
+  tor-a:
+    <<: *tor
+    container_name: tor-a
+    ports:
+      - "127.0.0.1:9060:9050"   # SOCKS
+      - "127.0.0.1:9061:9051"   # controle
+    volumes:
+      - tor-a-data:/var/lib/tor
+
+  tor-b:
+    <<: *tor
+    container_name: tor-b
+    ports:
+      - "127.0.0.1:9070:9050"   # SOCKS
+      - "127.0.0.1:9071:9051"   # controle
+    volumes:
+      - tor-b-data:/var/lib/tor
+
+  tor-c:
+    <<: *tor
+    container_name: tor-c
+    ports:
+      - "127.0.0.1:9080:9050"   # SOCKS
+      - "127.0.0.1:9081:9051"   # controle
+    volumes:
+      - tor-c-data:/var/lib/tor
+
+  tor-d:
+    <<: *tor
+    container_name: tor-d
+    ports:
+      - "127.0.0.1:9090:9050"   # SOCKS
+      - "127.0.0.1:9091:9051"   # controle
+    volumes:
+      - tor-d-data:/var/lib/tor
+
+networks:
+  searxng:
+    driver: bridge
+
+volumes:
+  valkey-data:
+  caddy-data:
+  tor-a-data:
+  tor-b-data:
+  tor-c-data:
+  tor-d-data:

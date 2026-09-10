@@ -30,6 +30,10 @@ class SearXNG:
         time_range: day, week, month ou year. None = sem filtro de data.
         Filtrar por data zera a busca em temas históricos, então só use
         quando a pergunta pedir dado recente.
+
+        Devolve TUDO que o SearXNG mandou, sem cortar em max_results: o corte
+        é de quem ranqueia (_merge_results), depois de ordenar por
+        concordância entre buscas e score.
         """
         params = {
             "q": query,
@@ -50,7 +54,7 @@ class SearXNG:
         response.raise_for_status()
         payload = response.json()
         self._note_health(payload)
-        return payload.get("results", [])[: self.max_results]
+        return payload.get("results", [])
 
     def _note_health(self, payload: dict) -> None:
         """Registra os motores que não responderam nesta busca.

@@ -112,6 +112,30 @@ class TestUnusable:
         assert not WebScraper.unusable("x" * 5000)
 
 
+class TestDownloadErrors:
+    """Download que falha vira aviso, nunca exceção: uma página ruim não
+    pode derrubar a pesquisa. Cobre os dois jeitos do curl_cffi falhar."""
+
+    def test_http_error_becomes_notice(self):
+        from curl_cffi.requests.exceptions import HTTPError
+
+        resp = type("R", (), {"raise_for_status": lambda self: (_ for _ in ()).throw(HTTPError("403")),
+                              "text": "", "url": "https://a.com/x"})()
+        with patch("socket.gethostbyname", return_value="93.184.216.34"), \
+             patch("web_search_mcp.util.scraper.curl_requests.get", return_value=resp):
+            ok, text, final = WebScraper()._download("https://a.com/x")
+        assert not ok and text.startswith("(não foi possível ler a página")
+        assert final == "https://a.com/x"
+
+    def test_network_error_becomes_notice(self):
+        from curl_cffi.curl import CurlError
+
+        with patch("socket.gethostbyname", return_value="93.184.216.34"), \
+             patch("web_search_mcp.util.scraper.curl_requests.get", side_effect=CurlError("timeout")):
+            ok, text, _ = WebScraper()._download("https://a.com/x")
+        assert not ok and WebScraper.failed(text)
+
+
 class TestLinkDensity:
     _INDEX = (
         "<html><body><main>"
@@ -134,20 +158,20 @@ class TestLinkDensity:
     def test_broken_html_returns_zero(self):
         assert WebScraper.link_density("") == 0.0
 
-    def test_reject_index_discards_only_when_asked(self):
+    def test_mark_index_flags_without_discarding(self):
         sc = WebScraper()
-        assert sc._extract(self._INDEX, reject_index=True).startswith("(página de índice")
-        assert not sc._extract(self._INDEX, reject_index=False).startswith("(página de índice")
+        with patch.object(sc, "_download", side_effect=lambda u: (True, self._INDEX if "capa" in u else self._ARTICLE, u)):
+            out = sc.read_many_dated(["https://a.com/capa", "https://a.com/materia"], mark_index=True)
+        (capa, _, capa_idx), (materia, _, mat_idx) = out
+        assert capa_idx is True and mat_idx is False
+        # marca, não descarta: o texto da capa continua lá para a reserva
+        assert "Manchete número 3" in capa
+        assert "parágrafo real" in materia
 
-    def test_rejected_index_counts_as_unusable(self):
+    def test_no_mark_without_asking(self):
         sc = WebScraper()
-        assert WebScraper.unusable(sc._extract(self._INDEX, reject_index=True))
-
-    def test_article_survives_reject_index(self):
-        sc = WebScraper()
-        out = sc._extract(self._ARTICLE, reject_index=True)
-        assert not WebScraper.failed(out)
-        assert "parágrafo real" in out
+        with patch.object(sc, "_download", side_effect=lambda u: (True, self._INDEX, u)):
+            assert sc.read_many_dated(["https://a.com/capa"])[0][2] is False
 
 
 class TestRedirected:

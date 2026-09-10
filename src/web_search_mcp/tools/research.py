@@ -11,11 +11,13 @@ import requests
 from .. import config
 from ..llm import chat, context_tokens
 from ..util.scraper import WebScraper
-from ..util.searxng import SearXNG
+from ..util.search_chain import build_search
 
 logger = logging.getLogger(__name__)
 
-_search = SearXNG()
+# Google CSE via Tor com SearXNG de reserva, ou só o SearXNG (SEARCH_BACKEND).
+# Mesma interface nos dois casos: o pipeline abaixo não sabe qual é.
+_search = build_search()
 _scraper = WebScraper(limit=config.RESEARCH_PAGE_CHARS)
 
 # Janela usada quando a pergunta pede dado recente.
@@ -45,7 +47,12 @@ _BASE_INSTRUCTION = (
     "Nunca combine numa mesma afirmação informações de fontes diferentes: "
     "se duas fontes contribuem, escreva duas frases, cada uma com sua "
     "marcação. Copie nomes de pessoas, cargos e números exatamente como "
-    "estão na fonte, sem aproximar nem fundir. Capa de portal mistura "
+    "estão na fonte, sem aproximar nem fundir. Quando várias fontes dão "
+    "valores diferentes para o MESMO dado, não liste um por fonte: "
+    "apresente o valor em que mais fontes concordam — sem maioria, o de "
+    "horário ou data mais tardio —, com a hora ou data e as marcações, e "
+    "diga numa frase quais fontes divergem e com que valor. "
+    "Capa de portal mistura "
     "notícia do dia com reportagem antiga: só apresente como fato de hoje "
     "o que o material datar de hoje. Cada bloco traz a data de publicação "
     "da página: se ela for anterior ao período que a pergunta pede, diga "
@@ -182,7 +189,7 @@ def _search_one(args: tuple[str, bool]) -> list[dict]:
 def _search_one_safe(args: tuple[str, bool]) -> list[dict]:
     """_search_one que não derruba as irmãs: variante que falhar vira lista
     vazia. A busca da pergunta original continua propagando erro — se ela
-    falhou, o SearXNG está fora e não há o que aproveitar."""
+    falhou, a busca está fora e não há o que aproveitar."""
     try:
         return _search_one(args)
     except Exception as e:
@@ -213,7 +220,7 @@ def _collect_links(query: str, recent: bool) -> list[dict]:
         per_query = []
     per_query.insert(0, original_results)
 
-    return _merge_results(per_query, query)
+    return _merge_results(per_query)
 
 
 def _search_health_note(results: list[dict]) -> str:
@@ -248,7 +255,7 @@ def _search_health_note(results: list[dict]) -> str:
     )
 
 
-def _merge_results(per_query: list[list[dict]], query: str = "") -> list[dict]:
+def _merge_results(per_query: list[list[dict]]) -> list[dict]:
     """Mescla os resultados das várias buscas, melhores primeiro.
 
     Round-robin (1º de cada busca, depois o 2º de cada) reparte o orçamento
@@ -279,35 +286,20 @@ def _merge_results(per_query: list[list[dict]], query: str = "") -> list[dict]:
         for key in {_normalize_url(r["url"]) for r in results if r.get("url")}:
             agreement[key] = agreement.get(key, 0) + 1
 
-    # Candidato que não compartilha NENHUMA palavra de conteúdo com a
-    # pergunta vai para o fim da fila. Quando o motor de busca não acha o
-    # termo procurado, ele casa a frase pela palavra funcional e devolve
-    # verbete de dicionário: medido em 29/08/2026, com 12 dos 14 motores
-    # suspensos, "Qual a melhor estratégia contra Ketheric Thorm" trouxe
-    # dicio.com.br/qual, linguee/best e onthisday.com, e "Como enfrentar o
-    # último chefão em The Witcher 3" trouxe o Como 1907 (time italiano) —
-    # nenhum deles tem um único token da pergunta no título ou na URL,
-    # enquanto thewitcher.com/br/pt-br e gamerant/.../ketheric-thorm têm.
-    # É demoção, não descarte: o candidato ainda serve de reserva se nada
-    # melhor sobrar, e a regra é léxica — vale para qualquer tema e idioma.
-    q_tokens = _content_tokens(query) if query else frozenset()
-
-    def overlaps(r: dict) -> bool:
-        if not q_tokens:
-            return True
-        text = f"{r.get('title', '')} {r.get('url', '')}"
-        return bool(q_tokens & _content_tokens(text))
-
-    def rank(r: dict) -> tuple[bool, int, float]:
+    # Sem demoção léxica (candidato sem palavra da pergunta no título/URL ia
+    # para o fim). Ela existia para o SearXNG com 12 de 14 motores suspensos,
+    # que casava a frase pela palavra funcional e devolvia verbete de
+    # dicionário. No Google CSE ela só errava: medido em 10/09/2026, mesmos
+    # resultados crus de 12 perguntas sem relação entre si, o top-5 mudou em
+    # 3 e nas 3 para pior — rebaixou bcb.gov.br/conversao (cotação do
+    # dólar), auth0 (OAuth2), paper do Raft no arxiv e guia de BG3 no
+    # reddit, páginas certas cujo título usa outras palavras.
+    def rank(r: dict) -> tuple[int, float]:
         try:
             score = float(r.get("score") or 0)
         except (TypeError, ValueError):
             score = 0.0
-        return (
-            not overlaps(r),
-            -agreement.get(_normalize_url(r.get("url", "")), 0),
-            -score,
-        )
+        return (-agreement.get(_normalize_url(r.get("url", "")), 0), -score)
 
     ranked = [sorted(results, key=rank) for results in per_query]
 
@@ -317,36 +309,23 @@ def _merge_results(per_query: list[list[dict]], query: str = "") -> list[dict]:
     merged: list[dict] = []
     seen: set[str] = set()
     per_domain: dict[str, int] = {}
-
-    def collect(accept) -> None:
-        for i in range(_search.max_results):
-            for results in ranked:
-                if i >= len(results):
-                    continue
-                url = results[i].get("url", "")
-                key = _normalize_url(url)
-                if not url or key in seen or not accept(results[i]):
-                    continue
-                domain = urlsplit(url).netloc.lower()
-                if (
-                    config.RESEARCH_MAX_PER_DOMAIN
-                    and per_domain.get(domain, 0) >= config.RESEARCH_MAX_PER_DOMAIN
-                ):
-                    continue
-                merged.append(results[i])
-                seen.add(key)
-                per_domain[domain] = per_domain.get(domain, 0) + 1
-
-    # Duas passadas: primeiro tudo que compartilha palavra com a pergunta,
-    # depois o resto como reserva. Ordenar só DENTRO de cada busca não basta
-    # — o round-robin pega o 1º de cada uma, então uma busca que só devolveu
-    # lixo emplaca o lixo dela na frente do 2º resultado bom de outra busca.
-    # Medido em 29/08/2026: com a demoção só intra-busca, sobraram no dossiê
-    # customerservice.costco.com (pergunta sobre Baldur's Gate 3), passagem
-    # de ônibus e previsão de Taubaté (pergunta sobre Florianópolis) e o
-    # verbete "alguma" do Dicio (pergunta sobre um modelo de IA).
-    collect(overlaps)
-    collect(lambda r: not overlaps(r))
+    for i in range(_search.max_results):
+        for results in ranked:
+            if i >= len(results):
+                continue
+            url = results[i].get("url", "")
+            key = _normalize_url(url)
+            if not url or key in seen:
+                continue
+            domain = urlsplit(url).netloc.lower()
+            if (
+                config.RESEARCH_MAX_PER_DOMAIN
+                and per_domain.get(domain, 0) >= config.RESEARCH_MAX_PER_DOMAIN
+            ):
+                continue
+            merged.append(results[i])
+            seen.add(key)
+            per_domain[domain] = per_domain.get(domain, 0) + 1
     return merged[: config.RESEARCH_POOL_SIZE]
 
 
@@ -436,6 +415,7 @@ def _label_citations(summary: str, pages_read: list[tuple[dict, str, str]]) -> s
 def _read_pages(
     candidates: list[dict],
     page_budget: int | None = None,
+    index_first_class: bool = False,
 ) -> list[tuple[dict, str, str]]:
     """Lê candidatos em ondas até juntar RESEARCH_PAGE_BUDGET páginas boas.
 
@@ -455,18 +435,56 @@ def _read_pages(
     pages_read: list[tuple[dict, str, str]] = []
     queue = [(r, r.get("url", "").strip()) for r in candidates]
     queue = [(r, u) for r, u in queue if u]
+    budget = page_budget or config.RESEARCH_PAGE_BUDGET
 
     char_budget = _dossier_char_budget()
     chars_used = 0
 
+    def admit(r: dict, url: str, page: str) -> bool:
+        """Põe a página no dossiê; False quando o orçamento de contexto acabou."""
+        nonlocal chars_used
+        # _render_dossier põe cabeçalho (título, URL, resumo da busca)
+        # antes de cada página; o orçamento conta isso também.
+        cost = len(page) + len(url) + len(r.get("title", "")) + len(r.get("content", "")) + 64
+        if pages_read and chars_used + cost > char_budget:
+            logger.info(
+                "_read_pages: orçamento de contexto atingido (%d de %d caracteres, "
+                "%d páginas); parando de ler e resumindo o que já tem",
+                chars_used, char_budget, len(pages_read),
+            )
+            return False
+        pages_read.append((r, url, page))
+        chars_used += cost
+        return True
+
+    # Capa, seção e hub vão para a reserva em vez de sumir. A matéria vem
+    # primeiro — ela responde; a capa é manchete solta e mistura dia com
+    # reportagem antiga. Mas quando as ondas acabam sem matéria suficiente,
+    # descartar a capa deixa vaga vazia. Medido em 10/09/2026, "principais
+    # notícias do Brasil e do mundo hoje": 18 candidatos baixados, 13
+    # descartados como índice/hub (g1, Estadão, CNN, Brasil 247, Al Jazeera,
+    # news.un.org...), o dossiê fechou com 3 páginas e o bloco Brasil saiu
+    # de um boletim setorial — as manchetes do dia estavam justamente nas
+    # capas descartadas.
+    #
+    # index_first_class (o `recent` da pergunta): quando o dado é de agora, a
+    # página de índice É onde ele mora — manchete do dia, cotação, placar,
+    # previsão — e a matéria costuma ser a de ontem. Aí o índice entra na
+    # ordem do ranking, sem esperar vaga sobrar. Critério de tempo, que quem
+    # chama já declara; nada aqui olha o assunto. Medido em 10/09/2026, só
+    # com reserva: "notícias de hoje" usou 1 capa das 11 reservadas (g1,
+    # Estadão e Al Jazeera ficaram de fora, e o dossiê pegou a página de
+    # seção da NPR com notícia de março); "cotação do dólar hoje" deixou na
+    # reserva economia.uol.com.br/cotacoes e valor-data.
+    reserve: list[tuple[dict, str, str]] = []
+
     for wave in range(config.RESEARCH_MAX_WAVES):
-        budget = page_budget or config.RESEARCH_PAGE_BUDGET
         if not queue or len(pages_read) >= budget:
             break
         remaining = budget - len(pages_read)
         batch, queue = queue[:remaining], queue[remaining:]
-        pages = _scraper.read_many_dated([u for _, u in batch], reject_index=True)
-        for (r, url), (page, page_date) in zip(batch, pages):
+        pages = _scraper.read_many_dated([u for _, u in batch], mark_index=True)
+        for (r, url), (page, page_date, is_index) in zip(batch, pages):
             r["_date"] = page_date
             if WebScraper.unusable(page):
                 logger.error(
@@ -474,25 +492,28 @@ def _read_pages(
                     wave + 1, url, len(page), page[:120],
                 )
                 continue
-            if _is_hub_page(url, page):
+            if is_index or _is_hub_page(url, page):
+                if index_first_class:
+                    r["_index"] = True
+                    if not admit(r, url, page):
+                        return pages_read
+                    continue
                 logger.info(
-                    "_read_pages: onda %d, descartada url=%s: página-hub "
-                    "(vitrine de links, sem conteúdo próprio)",
-                    wave + 1, url,
+                    "_read_pages: onda %d, reserva url=%s: capa/índice, só entra "
+                    "se faltar matéria", wave + 1, url,
                 )
+                reserve.append((r, url, page))
                 continue
-            # _render_dossier põe cabeçalho (título, URL, resumo da busca)
-            # antes de cada página; o orçamento conta isso também.
-            cost = len(page) + len(url) + len(r.get("title", "")) + len(r.get("content", "")) + 64
-            if pages_read and chars_used + cost > char_budget:
-                logger.info(
-                    "_read_pages: orçamento de contexto atingido (%d de %d caracteres, "
-                    "%d páginas); parando de ler e resumindo o que já tem",
-                    chars_used, char_budget, len(pages_read),
-                )
+            if not admit(r, url, page):
                 return pages_read
-            pages_read.append((r, url, page))
-            chars_used += cost
+
+    for r, url, page in reserve:
+        if len(pages_read) >= budget:
+            break
+        r["_index"] = True
+        if not admit(r, url, page):
+            break
+        logger.info("_read_pages: vaga preenchida pela reserva: url=%s", url)
     return pages_read
 
 
@@ -505,7 +526,8 @@ def _render_dossier(pages_read: list[tuple[dict, str, str]]) -> str:
         f"Título: {r.get('title', '').strip()}\n"
         f"URL: {url}\n"
         f"Publicado em: {r.get('_date') or 'data não informada'}\n"
-        f"Resumo da busca: {r.get('content', '').strip()}\n"
+        + ("Tipo: capa/índice — lista de manchetes, não matéria apurada\n" if r.get("_index") else "")
+        + f"Resumo da busca: {r.get('content', '').strip()}\n"
         f"Conteúdo da página:\n{page}"
         for i, (r, url, page) in enumerate(pages_read, 1)
     )
@@ -528,7 +550,7 @@ def _build_dossier(query: str, recent: bool) -> tuple[str, list[tuple[dict, str,
     """Busca, lê e monta o dossiê. Separado de _summarize para o eval
     conseguir o dossiê sem repesquisar."""
     results = _collect_links(query, recent)
-    pages_read = _read_pages(results) if results else []
+    pages_read = _read_pages(results, index_first_class=recent) if results else []
     return _render_dossier(pages_read), pages_read
 
 
@@ -576,10 +598,8 @@ _STOPWORDS = frozenset((
     "the a an of in on at to for from by with about and or what which "
     "who how when where is are was were be been do does did "
     # Verbos e pronomes de função: aparecem na pergunta inteira em linguagem
-    # natural e não dizem nada sobre o assunto. Sem eles, "Tem como adicionar
-    # um usuário no tailscale mas limitar as portas?" casava com páginas de
-    # gramática sobre "tem ou têm" — e o casamento em "tem" fazia a demoção
-    # lexical aceitá-las como se fossem do assunto (medido em 29/08/2026).
+    # natural e não dizem nada sobre o assunto — "Tem como limitar X?" e
+    # "Posso limitar X?" são a mesma pergunta para o anti-repetição.
     "tem tenho temos ter tinha pode posso podem podemos poder podia deve "
     "devo devem dever preciso precisa precisam vai vou vamos vao vão "
     "eu ele ela eles elas voce você nos nós lhe dele dela isto aquele aquela "
@@ -681,8 +701,8 @@ def research_web(query: str, recent: bool = False) -> str:
     try:
         results = _collect_links(query, recent)
     except requests.RequestException as e:
-        logger.error("research_web: SearXNG falhou para query=%r: %s", query, e)
-        return f"Erro ao consultar o SearXNG: {e}"
+        logger.error("research_web: busca falhou para query=%r: %s", query, e)
+        return f"Erro ao consultar a busca: {e}"
 
     if not results:
         logger.info("research_web: nenhum resultado para query=%r", query)
@@ -695,7 +715,7 @@ def research_web(query: str, recent: bool = False) -> str:
         _remember_result(query, outcome)
         return outcome
 
-    pages_read = _read_pages(results)
+    pages_read = _read_pages(results, index_first_class=recent)
     if not pages_read:
         logger.error("research_web: todas as %d páginas candidatas falharam para query=%r", len(results), query)
         outcome = _search_health_note(results) + "Nenhuma das páginas encontradas pôde ser lida."
