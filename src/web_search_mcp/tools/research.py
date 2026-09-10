@@ -11,11 +11,13 @@ import requests
 from .. import config
 from ..llm import chat, context_tokens
 from ..util.scraper import WebScraper
-from ..util.searxng import SearXNG
+from ..util.search_chain import build_search
 
 logger = logging.getLogger(__name__)
 
-_search = SearXNG()
+# Google CSE via Tor com SearXNG de reserva, ou só o SearXNG (SEARCH_BACKEND).
+# Mesma interface nos dois casos: o pipeline abaixo não sabe qual é.
+_search = build_search()
 _scraper = WebScraper(limit=config.RESEARCH_PAGE_CHARS)
 
 # Janela usada quando a pergunta pede dado recente.
@@ -182,7 +184,7 @@ def _search_one(args: tuple[str, bool]) -> list[dict]:
 def _search_one_safe(args: tuple[str, bool]) -> list[dict]:
     """_search_one que não derruba as irmãs: variante que falhar vira lista
     vazia. A busca da pergunta original continua propagando erro — se ela
-    falhou, o SearXNG está fora e não há o que aproveitar."""
+    falhou, a busca está fora e não há o que aproveitar."""
     try:
         return _search_one(args)
     except Exception as e:
@@ -290,7 +292,17 @@ def _merge_results(per_query: list[list[dict]], query: str = "") -> list[dict]:
     # enquanto thewitcher.com/br/pt-br e gamerant/.../ketheric-thorm têm.
     # É demoção, não descarte: o candidato ainda serve de reserva se nada
     # melhor sobrar, e a regra é léxica — vale para qualquer tema e idioma.
-    q_tokens = _content_tokens(query) if query else frozenset()
+    #
+    # Token de 1 caractere não conta aqui: "3" de "Act 3" e o "s" de
+    # "Baldur's" casam com qualquer URL que tenha um número ou um plural, e
+    # foi assim que outlook.live.com/mail/3 passou por "do assunto" numa
+    # pergunta sobre um jogo (10/09/2026). Só aqui — o anti-repetição usa
+    # _content_tokens inteiro, porque lá "Python 2" e "Python 3" têm que
+    # continuar sendo perguntas diferentes.
+    q_tokens = (
+        frozenset(t for t in _content_tokens(query) if len(t) > 1)
+        if query else frozenset()
+    )
 
     def overlaps(r: dict) -> bool:
         if not q_tokens:
@@ -681,8 +693,8 @@ def research_web(query: str, recent: bool = False) -> str:
     try:
         results = _collect_links(query, recent)
     except requests.RequestException as e:
-        logger.error("research_web: SearXNG falhou para query=%r: %s", query, e)
-        return f"Erro ao consultar o SearXNG: {e}"
+        logger.error("research_web: busca falhou para query=%r: %s", query, e)
+        return f"Erro ao consultar a busca: {e}"
 
     if not results:
         logger.info("research_web: nenhum resultado para query=%r", query)

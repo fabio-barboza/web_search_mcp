@@ -1,3 +1,35 @@
+# Infraestrutura de busca do web_search_mcp. Numa cópia nova do repo:
+#   cp .env.example .env
+#   cd search-engine && docker compose up -d
+# e rode o MCP. Sobe o SearXNG (searxng/) e os dois canais Tor (tor/).
+
+# Canal de busca via Tor (plans/tor.md). tor-a e tor-b são idênticos: o
+# research_web alterna as queries entre os dois e, quando o Google barra um,
+# refaz a query no outro na hora enquanto o barrado troca de circuito.
+x-tor: &tor
+  build: ./tor
+  image: web-search-tor:0.4.9.12
+  restart: unless-stopped
+  # O MESMO .env da raiz que configura o MCP: dali sai o TOR_CONTROL_PASSWORD
+  # (senha do ControlPort, usada no NEWNYM), então os dois lados nunca
+  # divergem. Sem ele o compose falha na hora, em vez de subir com senha
+  # que o MCP não conhece.
+  env_file: ../.env
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: "1m"
+      max-file: "1"
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "--socks5-hostname", "127.0.0.1:9050",
+           "https://check.torproject.org/api/ip"]
+    interval: 5m
+    timeout: 30s
+    retries: 3
+    start_period: 60s
+
 services:
   valkey:
     image: valkey/valkey:8-alpine
@@ -34,12 +66,12 @@ services:
     networks:
       - searxng
     volumes:
-      - ./data:/etc/searxng:rw
+      - ./searxng/data:/etc/searxng:rw
       # Config versionada no repo, montada por cima do data/: já vem com
       # formats json (sem ele o research_web leva 403) e a curadoria de
       # fontes prioritárias. Sem este mount o SearXNG geraria um settings.yml
       # padrão no primeiro boot, que precisaria de edição manual.
-      - ./settings.yml:/etc/searxng/settings.yml:ro
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     environment:
       - SEARXNG_BASE_URL=http://localhost:8886/
       - SEARXNG_SECRET=password123
@@ -86,7 +118,7 @@ services:
     ports:
       - "8887:8887"
     volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./searxng/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
     networks:
       - searxng
@@ -98,6 +130,26 @@ services:
     depends_on:
       - mcp-searxng
 
+  # Portas SÓ em 127.0.0.1: publicar em 0.0.0.0 viraria proxy aberto para a
+  # rede. Batem com TOR_CHANNELS do .env.example (host:socks:controle).
+  tor-a:
+    <<: *tor
+    container_name: tor-a
+    ports:
+      - "127.0.0.1:9060:9050"   # SOCKS
+      - "127.0.0.1:9061:9051"   # controle
+    volumes:
+      - tor-a-data:/var/lib/tor
+
+  tor-b:
+    <<: *tor
+    container_name: tor-b
+    ports:
+      - "127.0.0.1:9070:9050"   # SOCKS
+      - "127.0.0.1:9071:9051"   # controle
+    volumes:
+      - tor-b-data:/var/lib/tor
+
 networks:
   searxng:
     driver: bridge
@@ -105,3 +157,5 @@ networks:
 volumes:
   valkey-data:
   caddy-data:
+  tor-a-data:
+  tor-b-data:

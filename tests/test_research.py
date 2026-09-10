@@ -283,6 +283,20 @@ class TestLexicalDemotion:
         assert urls[:2] == [boa[0]["url"], boa[1]["url"]]
         assert urls[2] == lixo[0]["url"]
 
+    def test_good_result_past_max_results_is_not_lost(self):
+        """Motor quebrado enchendo as primeiras posições não pode expulsar o
+        resultado bom que veio depois delas: o corte em max_results é feito
+        depois do ranking. Medido em 10/09/2026 com bing: 10 posições de
+        outlook.live.com na frente do bg3.wiki que o google cse achou."""
+        lixo = [
+            {"url": f"https://outlook.live.com/mail/{i}", "title": "Outlook", "score": 1.0}
+            for i in range(research._search.max_results)
+        ]
+        bom = {"url": "https://bg3.wiki/wiki/Sorcerous_Vault", "title": "Sorcerous Vault", "score": 1.0}
+        urls = [r["url"] for r in research._merge_results(
+            [lixo + [bom]], "Baldur's Gate 3 Sorcerous Vault door")]
+        assert urls[0] == bom["url"]
+
     def test_no_query_keeps_previous_order(self):
         a = {"url": "https://a.com/x", "title": "", "score": 1.0}
         b = {"url": "https://b.com/y", "title": "", "score": 9.0}

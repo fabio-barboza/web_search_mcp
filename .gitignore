@@ -6,4 +6,4 @@ __pycache__/
 .pytest_cache/
 evals/results/
 dist/
-searxng/data/
+search-engine/searxng/data/

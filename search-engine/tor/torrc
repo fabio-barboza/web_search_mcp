@@ -1,0 +1,23 @@
+# Um canal de busca. O mesmo arquivo serve para tor-a e tor-b; o que os torna
+# canais independentes é o DataDirectory de cada um (volumes separados =
+# guard nodes diferentes).
+
+# IsolateSOCKSAuth: cada usuário/senha SOCKS diferente ganha circuito próprio,
+# na hora. É assim que o canal barrado pelo Google troca de IP sem esperar os
+# 10 s de limite do NEWNYM.
+SocksPort 0.0.0.0:9050 IsolateSOCKSAuth
+
+# A porta publicada chega pelo gateway do Docker (faixa privada). Qualquer
+# outra origem é recusada: isto não pode virar proxy aberto.
+SocksPolicy accept 127.0.0.0/8
+SocksPolicy accept 10.0.0.0/8
+SocksPolicy accept 172.16.0.0/12
+SocksPolicy accept 192.168.0.0/16
+SocksPolicy reject *
+
+# Controle só para SIGNAL NEWNYM e diagnóstico. A senha (hash) entra pela
+# linha de comando, gerada no entrypoint a partir de TOR_CONTROL_PASSWORD.
+ControlPort 0.0.0.0:9051
+
+DataDirectory /var/lib/tor
+Log notice stdout

@@ -17,7 +17,7 @@ resumo curto — nunca vê o material bruto.
   agente principal   │  web-search-mcp (contexto próprio)          │
   ────────────────   │                                             │
                      │  1. gera variantes de busca (LLM)           │
-  "quem foi X?"  ──► │  2. busca em paralelo no SearXNG            │
+  "quem foi X?"  ──► │  2. busca em paralelo (Google via Tor)      │
                      │  3. abre as N melhores páginas              │
                      │  4. monta o dossiê ....... 15-50k chars     │
                      │  5. resume com as fontes (LLM)              │
@@ -51,51 +51,68 @@ que serve, e aí o conteúdo vai inteiro para o agente, sem resumo.
 
 - Python ≥ 3.13
 - [uv](https://docs.astral.sh/uv/)
-- Um servidor de busca [SearXNG](https://docs.searxng.org/) rodando (formato JSON habilitado) — há um `docker compose` pronto em [`searxng/`](#searxng-via-docker-compose)
+- A stack de busca: dois containers Tor (a fonte de links é o Google CSE, consultado por eles) e um [SearXNG](https://docs.searxng.org/) de reserva, com formato JSON habilitado — tudo num `docker compose` pronto em [`search-engine/`](#infraestrutura-de-busca-via-docker-compose). Sem os Tor a busca ainda funciona (CSE direto, depois SearXNG); `SEARCH_BACKEND=searxng` usa só o SearXNG
 - Um servidor de LLM com API compatível com OpenAI (`/v1/chat/completions` e `/v1/models`) — ex. [llama.cpp server](https://github.com/ggml-org/llama.cpp), vLLM, ou a própria OpenAI
 
-### SearXNG via docker compose
+### Infraestrutura de busca via docker compose
 
-O diretório `searxng/` traz a stack que eu uso, já na porta que é o default do
-`SEARXNG_URL`:
+`search-engine/` traz a stack de busca inteira, já nas portas que são o
+default do `.env.example`. Numa cópia nova do repo:
 
 ```bash
-cd searxng
+cp .env.example .env          # troque TOR_CONTROL_PASSWORD
+cd search-engine
 docker compose up -d
 ```
 
-Sobe SearXNG em `http://localhost:8886` mais um Valkey de cache. Na primeira
-subida o SearXNG gera `searxng/data/settings.yml` (ignorado pelo git) com
-`formats: [html]` — **o `research_web` não funciona assim**, porque o cliente
-pede `format=json` (`util/searxng.py:32`) e o SearXNG responde 403. Habilite o
-JSON e reinicie:
+Sobe:
 
-```yaml
-# searxng/data/settings.yml
-search:
-  formats:
-    - html
-    - json
-```
+| Serviço | Porta (host) | Papel |
+|---|---|---|
+| `searxng` + `valkey` | `8886` | SearXNG com `search-engine/searxng/settings.yml` montado por cima (JSON habilitado e curadoria de fontes já prontos) |
+| `tor-a` | `127.0.0.1:9060` SOCKS, `9061` controle | canal de busca via Tor ([`plans/tor.md`](plans/tor.md)) |
+| `tor-b` | `127.0.0.1:9070` SOCKS, `9071` controle | segundo canal, independente do primeiro |
+| `mcp-searxng` + `caddy` | `8887` | servidor MCP de busca de terceiros, independente deste projeto (ver abaixo) |
+
+Os containers Tor leem o **mesmo `.env` da raiz** que configura o MCP
+(`env_file: ../.env`), então a senha do ControlPort é uma só e não há como os
+dois lados divergirem. Sem o `.env` o compose falha na hora. As portas Tor só
+escutam em `127.0.0.1`: publicar em `0.0.0.0` transformaria a máquina num
+proxy aberto.
+
+Os serviços `mcp-searxng` e `caddy` são um servidor MCP de busca de terceiros
+— este projeto fala com o SearXNG direto, por HTTP. Se você não os usa, pode
+removê-los do compose sem afetar em nada o `web-search-mcp`.
+
+Antes de subir isso em qualquer lugar que não seja sua máquina, troque as
+senhas. Os placeholders estão versionados neste repositório e portanto são
+públicos:
+
+- `TOR_CONTROL_PASSWORD` (no `.env`) — quem tiver a senha controla o tor
+- `SEARXNG_SECRET` (em `search-engine/docker-compose.yaml`) — chave com que o
+  SearXNG assina; deve ser um valor aleatório e longo, ex. `openssl rand -hex 32`
+- o `Bearer password123` do `search-engine/searxng/caddy/Caddyfile` — é a
+  **única** autenticação na frente do `mcp-searxng`, cuja porta `8887` é
+  publicada no host. Quem souber o token usa o serviço
+
+### Tudo de uma vez: `start.sh`
 
 ```bash
-docker compose restart searxng
+./start.sh
 ```
 
-Os serviços `mcp-searxng` e `caddy` do compose são um servidor MCP de busca
-de terceiros, independente deste projeto — este aqui fala com o SearXNG
-direto, por HTTP. Se você não os usa, pode removê-los do compose sem afetar em
-nada o `web-search-mcp`.
+Cria o `.env` a partir do `.env.example` se ele não existir, lembra quais
+variáveis conferir (`MODEL_BASE_URL`, `MODEL_API_KEY`, `TOR_CONTROL_PASSWORD`,
+`MCP_HOST`/`MCP_PORT`) e espera um Enter. Depois confere se as portas e os
+nomes de container estão livres, sobe o `search-engine/` e inicia o MCP em
+streamable-http. No fim mostra a URL para plugar o cliente
+(`http://127.0.0.1:8765/mcp` por padrão). **Ctrl+C derruba tudo**: o MCP e os
+containers (`docker compose down`; volumes preservados). Se o MCP cair
+sozinho, a stack cai junto. Argumentos extras vão para o `web-search-mcp`.
 
-Antes de subir isso em qualquer lugar que não seja sua máquina, troque as duas
-senhas do compose. Elas vêm com o placeholder `password123`, que está
-versionado neste repositório e portanto é público:
-
-- `SEARXNG_SECRET` (em `searxng/docker-compose.yaml`) — chave com que o SearXNG
-  assina; deve ser um valor aleatório e longo, ex. `openssl rand -hex 32`
-- o `Bearer password123` do `searxng/caddy/Caddyfile` — é a **única**
-  autenticação na frente do `mcp-searxng`, cuja porta `8887` é publicada no
-  host. Quem souber o token usa o serviço
+O LLM continua externo: se `MODEL_BASE_URL` não responder, o script avisa e
+sobe assim mesmo — `read_url` funciona sem ele, `research_web` e
+`analyze_urls` não.
 
 ## Instalação
 
@@ -287,6 +304,27 @@ A lista completa, com o default de cada uma:
 | `EXTRA_BODY` | *(vazio)* | JSON cru mesclado no payload do `/chat/completions`, para parâmetro que só o seu provider entende. Ex. desligar reasoning no Qwen3: `EXTRA_BODY={"chat_template_kwargs": {"enable_thinking": false}}`. JSON inválido derruba o servidor no boot, de propósito                                                                                                                |
 | `EXTRA_SYSTEM_PROMPT` | *(vazio)* | Texto apenso ao fim do system prompt em toda chamada. Existe porque nem todo modelo desliga reasoning por parâmetro de API — em alguns só obedece por instrução. Ex. `EXTRA_SYSTEM_PROMPT=Reasoning strength: low`. Vale a pena: num modelo que pensa por padrão, gerar 3 linhas de busca custou 2767 tokens / 39s sem, contra 271 / 3s com                                   |
 
+### Busca (Google CSE via Tor)
+
+A fonte de links do `research_web` é o Google CSE, consultado por dois
+canais Tor. As queries de uma pesquisa se alternam entre os canais; quando o
+Google barra um, a mesma query refaz no outro na hora, enquanto o barrado
+troca de circuito em segundo plano (credencial SOCKS nova + `NEWNYM`).
+Barrado nos dois: uma última tentativa no primeiro, já com circuito novo;
+depois o CSE pelo IP da máquina; depois o SearXNG — e aí a resposta vem com
+o aviso de busca degradada. Ninguém espera em nenhum passo.
+
+| Variável | Default | O que faz |
+|---|---|---|
+| `SEARCH_BACKEND` | `google_tor` | `google_tor` (Google CSE pelos canais Tor, com CSE direto e SearXNG de reserva) ou `searxng` (só o SearXNG, como antes). Rollback é trocar e reiniciar |
+| `TOR_CHANNELS` | `127.0.0.1:9060:9061,127.0.0.1:9070:9071` | Um canal por item, `host:porta_socks:porta_controle`, separados por vírgula. O default bate com os `tor-a`/`tor-b` do `search-engine/` |
+| `TOR_CONTROL_PASSWORD` | *(vazio)* | Senha do ControlPort, para o `NEWNYM`. Os containers Tor não sobem sem ela; o MCP sim — vazia só desliga o `NEWNYM`, e a troca de circuito pela credencial SOCKS continua funcionando |
+| `GOOGLE_CSE_CX` | CX público do blackle.com | Qual CSE consultar. Troque por um CX seu sem mexer no código |
+| `GOOGLE_CSE_HL` | `pt-BR` | Idioma da interface do CSE. Não restringe o idioma dos resultados |
+| `GOOGLE_CSE_TIMEOUT` | `15` | Timeout, em segundos, de cada requisição ao CSE (via Tor leva 2-4 s) |
+| `GOOGLE_CSE_DIRECT_FALLBACK` | `true` | Tentar o CSE pelo IP da máquina quando os canais Tor falham |
+| `SEARXNG_FALLBACK` | `true` | Cair no SearXNG quando o Google falhou por todos os caminhos |
+
 ### SearXNG
 
 | Variável | Default | O que faz |
@@ -294,7 +332,7 @@ A lista completa, com o default de cada uma:
 | `SEARXNG_URL` | `http://localhost:8886` | Base da sua instância SearXNG. Precisa estar com o formato JSON habilitado |
 | `SEARXNG_MAX_RESULTS` | `10` | Quantos resultados são pedidos por busca. O `research_web` faz várias buscas e junta, então isso é o teto por busca, não o total |
 | `SEARXNG_TIMEOUT` | `10` | Timeout, em segundos, de cada consulta ao SearXNG |
-| `SEARXNG_LANGUAGE` | `pt-BR` | Idioma passado na busca. Muda que fontes aparecem — para pesquisar em inglês, `en-US` |
+| `SEARXNG_LANGUAGE` | `auto` | Idioma passado na busca. `auto` deixa o SearXNG detectar pela query (pergunta em inglês busca página em inglês); fixar `pt-BR` empurra toda busca para página brasileira |
 | `SEARXNG_CATEGORIES` | `general,news` | Categorias do SearXNG, separadas por vírgula, repassadas cruas |
 
 ### Scraper
@@ -454,7 +492,8 @@ src/web_search_mcp/
     searxng.py   # cliente do SearXNG
 tests/           # pytest, sem rede, sem LLM
 evals/           # roda contra web/LLM reais, sob demanda
-searxng/         # docker compose do SearXNG (dependência externa, opcional)
+search-engine/   # docker compose da busca: SearXNG + canais Tor (dependência externa)
+plans/           # planos de mudança aprovados
 ```
 
 Layout `src/` de propósito: o pacote instalado ocupa um único namespace
