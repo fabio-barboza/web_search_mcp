@@ -68,7 +68,7 @@ class TestReadPages:
 
         call_count = {"n": 0}
 
-        def fake_read_many(urls, reject_index=False):
+        def fake_read_many(urls, mark_index=False):
             call_count["n"] += 1
             # primeira onda: primeiro link falha, resto tem sucesso
             out = []
@@ -80,7 +80,7 @@ class TestReadPages:
                     # piso de tamanho descarta a página e o teste mede a
                     # coisa errada.
                     out.append(f"conteúdo de {u} " + "x" * 2000)
-            return [(t, None) for t in out]
+            return [(t, None, False) for t in out]
 
         with patch.object(research._scraper, "read_many_dated", side_effect=fake_read_many), \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 3), \
@@ -96,7 +96,7 @@ class TestReadPages:
         with patch.object(research._scraper, "read_many_dated", return_value=None) as m, \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 5), \
              patch.object(config, "RESEARCH_MAX_WAVES", 2):
-            m.side_effect = lambda urls, reject_index=False: [("(sem conteúdo extraível)", None) for _ in urls]
+            m.side_effect = lambda urls, mark_index=False: [("(sem conteúdo extraível)", None, False) for _ in urls]
             pages = research._read_pages(candidates)
 
         assert m.call_count == 2
@@ -107,7 +107,7 @@ class TestReadPages:
 
         # 12288 tokens úteis * _CHARS_PER_TOKEN = orçamento em caracteres.
         # Páginas de 12000 + cabeçalho (~79): duas cabem, a terceira não.
-        with patch.object(research._scraper, "read_many_dated", side_effect=lambda urls, reject_index=False: [("c" * 12000, None) for _ in urls]), \
+        with patch.object(research._scraper, "read_many_dated", side_effect=lambda urls, mark_index=False: [("c" * 12000, None, False) for _ in urls]), \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 10), \
              patch.object(config, "RESEARCH_MAX_WAVES", 4), \
              patch.object(config, "MODEL_CONTEXT_TOKENS", 16384), \
@@ -120,7 +120,7 @@ class TestReadPages:
     def test_first_page_enters_even_if_over_budget(self):
         """Uma página sozinha maior que a janela ainda é melhor que nada: ela
         entra e o _render_dossier corta o excesso."""
-        with patch.object(research._scraper, "read_many_dated", side_effect=lambda urls, reject_index=False: [("c" * 500000, None) for _ in urls]), \
+        with patch.object(research._scraper, "read_many_dated", side_effect=lambda urls, mark_index=False: [("c" * 500000, None, False) for _ in urls]), \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 3), \
              patch.object(config, "RESEARCH_MAX_WAVES", 1), \
              patch.object(config, "MODEL_CONTEXT_TOKENS", 16384), \
@@ -416,23 +416,86 @@ class TestSuspiciousUrl:
         assert "https://ok.com/boa" in urls
 
 
-class TestRejectIndex:
-    def test_research_always_rejects_index_pages(self):
-        """Toda leitura do research pede rejeição de índice: o pipeline quer
-        a página que responde, nunca a vitrine de links para outras."""
+class TestIndexReserve:
+    """Capa/índice/hub não some: vai para a reserva e só ocupa vaga que a
+    matéria deixou vazia. Os dois desfechos: com matéria suficiente a capa
+    não entra; sem ela, a capa preenche."""
+
+    _ARTIGO = "texto corrido de matéria. " * 100
+    _CAPA = "\n".join(f"Manchete número {i} do dia" for i in range(60))
+
+    def _fake(self, index_urls):
+        def read(urls, mark_index=False):
+            assert mark_index is True
+            return [
+                (self._CAPA, None, True) if u in index_urls else (self._ARTIGO, None, False)
+                for u in urls
+            ]
+        return read
+
+    def test_capa_nao_toma_vaga_de_materia(self):
+        candidates = [{"url": "https://portal.com/"}] + [
+            {"url": f"https://site{i}.com/materia/{i}"} for i in range(4)
+        ]
+        with patch.object(research._scraper, "read_many_dated",
+                          side_effect=self._fake({"https://portal.com/"})), \
+             patch.object(config, "RESEARCH_PAGE_BUDGET", 3), \
+             patch.object(config, "RESEARCH_MAX_WAVES", 4):
+            pages = research._read_pages(candidates)
+        assert [u for _, u, _ in pages] == [f"https://site{i}.com/materia/{i}" for i in range(3)]
+
+    def test_capa_preenche_vaga_quando_falta_materia(self):
+        capas = {"https://g1.com/", "https://estadao.com/"}
+        candidates = [{"url": "https://g1.com/"}, {"url": "https://site.com/materia/1"},
+                      {"url": "https://estadao.com/"}]
+        with patch.object(research._scraper, "read_many_dated", side_effect=self._fake(capas)), \
+             patch.object(config, "RESEARCH_PAGE_BUDGET", 3), \
+             patch.object(config, "RESEARCH_MAX_WAVES", 4):
+            pages = research._read_pages(candidates)
+        # matéria primeiro, capas depois, na ordem do ranking
+        assert [u for _, u, _ in pages] == [
+            "https://site.com/materia/1", "https://g1.com/", "https://estadao.com/"]
+        assert [bool(r.get("_index")) for r, _, _ in pages] == [False, True, True]
+
+    def test_recent_capa_entra_na_ordem_do_ranking(self):
+        """recent=True: índice tem o dado de agora (manchete, cotação) e
+        entra na ordem do ranking, marcado; recent=False o mesmo conjunto
+        põe a matéria na frente."""
+        capas = {"https://g1.com/", "https://cotacoes.com/"}
+        candidates = [{"url": "https://g1.com/"}, {"url": "https://site.com/materia/1"},
+                      {"url": "https://cotacoes.com/"}, {"url": "https://site.com/materia/2"}]
+        with patch.object(research._scraper, "read_many_dated", side_effect=self._fake(capas)), \
+             patch.object(config, "RESEARCH_PAGE_BUDGET", 3), \
+             patch.object(config, "RESEARCH_MAX_WAVES", 4):
+            recent = research._read_pages([dict(c) for c in candidates], index_first_class=True)
+            timeless = research._read_pages([dict(c) for c in candidates])
+        assert [u for _, u, _ in recent] == [
+            "https://g1.com/", "https://site.com/materia/1", "https://cotacoes.com/"]
+        assert [bool(r.get("_index")) for r, _, _ in recent] == [True, False, True]
+        assert [u for _, u, _ in timeless] == [
+            "https://site.com/materia/1", "https://site.com/materia/2", "https://g1.com/"]
+
+    def test_research_web_passa_recent(self):
         seen = {}
 
-        def fake_read_many(urls, reject_index=False):
-            seen["reject_index"] = reject_index
-            return [("conteúdo " + "x" * 2000, None) for _ in urls]
+        def fake_read(candidates, page_budget=None, index_first_class=False):
+            seen["flag"] = index_first_class
+            return [({"title": "t"}, "https://a.com/x", "conteúdo " * 100)]
 
-        with patch.object(research._scraper, "read_many_dated", side_effect=fake_read_many), \
-             patch("web_search_mcp.tools.research._collect_links",
-                   return_value=[{"url": "https://bg3.wiki/wiki/Gontr_Mael"}]), \
-             patch("web_search_mcp.tools.research._summarize", return_value="resumo"):
-            research.research_web("melhores itens para Gloomstalker no ato 3")
+        for recent in (True, False):
+            research._recent_calls.clear()
+            with patch.object(research, "_read_pages", side_effect=fake_read), \
+                 patch.object(research, "_collect_links", return_value=[{"url": "https://a.com/x"}]), \
+                 patch.object(research, "_summarize", return_value="resumo"):
+                research.research_web(f"pergunta {recent}", recent=recent)
+            assert seen["flag"] is recent
 
-        assert seen["reject_index"] is True
+    def test_dossie_marca_capa(self):
+        pages = [({"title": "t", "_index": True}, "https://g1.com/", "manchetes"),
+                 ({"title": "t"}, "https://site.com/m", "matéria")]
+        dossier = research._render_dossier(pages)
+        assert dossier.count("Tipo: capa/índice") == 1
+        assert dossier.index("Tipo: capa/índice") < dossier.index("FONTE [2]")
 
 
 class TestHubPage:
@@ -458,15 +521,19 @@ class TestHubPage:
         # Post curto publicado na raiz: poucas linhas, não é vitrine.
         assert not research._is_hub_page("https://blog.com/meu-post", "linha\nlinha\nlinha")
 
-    def test_hub_discarded_by_read_pages(self):
+    def test_hub_only_enters_from_reserve(self):
+        """Hub (sem densidade de link alta) também vai para a reserva: sem
+        matéria nenhuma, ele entra marcado como capa."""
         candidates = [{"url": "https://portal.com/tecnologia/"}]
         page = self._MENU + "\n" + "x" * 1000
 
         with patch.object(research._scraper, "read_many_dated",
-                          side_effect=lambda urls, reject_index=False: [(page, None)]), \
+                          side_effect=lambda urls, mark_index=False: [(page, None, False)]), \
              patch.object(config, "RESEARCH_PAGE_BUDGET", 3), \
              patch.object(config, "RESEARCH_MAX_WAVES", 1):
-            assert research._read_pages(candidates) == []
+            pages = research._read_pages(candidates)
+        assert [u for _, u, _ in pages] == ["https://portal.com/tecnologia/"]
+        assert pages[0][0]["_index"] is True
 
 
 class TestLabelCitations:

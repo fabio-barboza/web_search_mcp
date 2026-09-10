@@ -165,8 +165,13 @@ Pipeline in `tools/research.py::research_web`:
 `read_url` is the plain counterpart: single URL, full text, no LLM, no
 budget truncation (`WebScraper(limit=None)`).
 
-`util/scraper.py` (`WebScraper`) downloads with a real browser UA (bare
-`Mozilla/5.0` gets 406'd by some sites), extracts main content via
+`util/scraper.py` (`WebScraper`) downloads through `curl_cffi` impersonating
+Chrome's TLS/HTTP2 fingerprint (a Chrome UA on top of `requests`' fingerprint
+still got 403 from UOL, Glassdoor, Britannica; JS challenges like Cloudflare's
+still fail — that needs a real browser). Index pages (link density ≥ 0.65) and
+hubs are *marked*, not dropped: `_read_pages` keeps them in a reserve that only
+fills leftover slots, except with `recent=True`, where they enter in rank order
+(the headline/quote/forecast of "now" lives on them). It extracts main content via
 trafilatura with a structural DOM-cleaning fallback (`_clean`) for pages
 where "main content" extraction misses short but relevant text (bios,
 headline aggregators). Blocks SSRF (private/loopback/link-local IPs,

@@ -47,7 +47,12 @@ _BASE_INSTRUCTION = (
     "Nunca combine numa mesma afirmação informações de fontes diferentes: "
     "se duas fontes contribuem, escreva duas frases, cada uma com sua "
     "marcação. Copie nomes de pessoas, cargos e números exatamente como "
-    "estão na fonte, sem aproximar nem fundir. Capa de portal mistura "
+    "estão na fonte, sem aproximar nem fundir. Quando várias fontes dão "
+    "valores diferentes para o MESMO dado, não liste um por fonte: "
+    "apresente o valor em que mais fontes concordam — sem maioria, o de "
+    "horário ou data mais tardio —, com a hora ou data e as marcações, e "
+    "diga numa frase quais fontes divergem e com que valor. "
+    "Capa de portal mistura "
     "notícia do dia com reportagem antiga: só apresente como fato de hoje "
     "o que o material datar de hoje. Cada bloco traz a data de publicação "
     "da página: se ela for anterior ao período que a pergunta pede, diga "
@@ -410,6 +415,7 @@ def _label_citations(summary: str, pages_read: list[tuple[dict, str, str]]) -> s
 def _read_pages(
     candidates: list[dict],
     page_budget: int | None = None,
+    index_first_class: bool = False,
 ) -> list[tuple[dict, str, str]]:
     """Lê candidatos em ondas até juntar RESEARCH_PAGE_BUDGET páginas boas.
 
@@ -429,18 +435,56 @@ def _read_pages(
     pages_read: list[tuple[dict, str, str]] = []
     queue = [(r, r.get("url", "").strip()) for r in candidates]
     queue = [(r, u) for r, u in queue if u]
+    budget = page_budget or config.RESEARCH_PAGE_BUDGET
 
     char_budget = _dossier_char_budget()
     chars_used = 0
 
+    def admit(r: dict, url: str, page: str) -> bool:
+        """Põe a página no dossiê; False quando o orçamento de contexto acabou."""
+        nonlocal chars_used
+        # _render_dossier põe cabeçalho (título, URL, resumo da busca)
+        # antes de cada página; o orçamento conta isso também.
+        cost = len(page) + len(url) + len(r.get("title", "")) + len(r.get("content", "")) + 64
+        if pages_read and chars_used + cost > char_budget:
+            logger.info(
+                "_read_pages: orçamento de contexto atingido (%d de %d caracteres, "
+                "%d páginas); parando de ler e resumindo o que já tem",
+                chars_used, char_budget, len(pages_read),
+            )
+            return False
+        pages_read.append((r, url, page))
+        chars_used += cost
+        return True
+
+    # Capa, seção e hub vão para a reserva em vez de sumir. A matéria vem
+    # primeiro — ela responde; a capa é manchete solta e mistura dia com
+    # reportagem antiga. Mas quando as ondas acabam sem matéria suficiente,
+    # descartar a capa deixa vaga vazia. Medido em 10/09/2026, "principais
+    # notícias do Brasil e do mundo hoje": 18 candidatos baixados, 13
+    # descartados como índice/hub (g1, Estadão, CNN, Brasil 247, Al Jazeera,
+    # news.un.org...), o dossiê fechou com 3 páginas e o bloco Brasil saiu
+    # de um boletim setorial — as manchetes do dia estavam justamente nas
+    # capas descartadas.
+    #
+    # index_first_class (o `recent` da pergunta): quando o dado é de agora, a
+    # página de índice É onde ele mora — manchete do dia, cotação, placar,
+    # previsão — e a matéria costuma ser a de ontem. Aí o índice entra na
+    # ordem do ranking, sem esperar vaga sobrar. Critério de tempo, que quem
+    # chama já declara; nada aqui olha o assunto. Medido em 10/09/2026, só
+    # com reserva: "notícias de hoje" usou 1 capa das 11 reservadas (g1,
+    # Estadão e Al Jazeera ficaram de fora, e o dossiê pegou a página de
+    # seção da NPR com notícia de março); "cotação do dólar hoje" deixou na
+    # reserva economia.uol.com.br/cotacoes e valor-data.
+    reserve: list[tuple[dict, str, str]] = []
+
     for wave in range(config.RESEARCH_MAX_WAVES):
-        budget = page_budget or config.RESEARCH_PAGE_BUDGET
         if not queue or len(pages_read) >= budget:
             break
         remaining = budget - len(pages_read)
         batch, queue = queue[:remaining], queue[remaining:]
-        pages = _scraper.read_many_dated([u for _, u in batch], reject_index=True)
-        for (r, url), (page, page_date) in zip(batch, pages):
+        pages = _scraper.read_many_dated([u for _, u in batch], mark_index=True)
+        for (r, url), (page, page_date, is_index) in zip(batch, pages):
             r["_date"] = page_date
             if WebScraper.unusable(page):
                 logger.error(
@@ -448,25 +492,28 @@ def _read_pages(
                     wave + 1, url, len(page), page[:120],
                 )
                 continue
-            if _is_hub_page(url, page):
+            if is_index or _is_hub_page(url, page):
+                if index_first_class:
+                    r["_index"] = True
+                    if not admit(r, url, page):
+                        return pages_read
+                    continue
                 logger.info(
-                    "_read_pages: onda %d, descartada url=%s: página-hub "
-                    "(vitrine de links, sem conteúdo próprio)",
-                    wave + 1, url,
+                    "_read_pages: onda %d, reserva url=%s: capa/índice, só entra "
+                    "se faltar matéria", wave + 1, url,
                 )
+                reserve.append((r, url, page))
                 continue
-            # _render_dossier põe cabeçalho (título, URL, resumo da busca)
-            # antes de cada página; o orçamento conta isso também.
-            cost = len(page) + len(url) + len(r.get("title", "")) + len(r.get("content", "")) + 64
-            if pages_read and chars_used + cost > char_budget:
-                logger.info(
-                    "_read_pages: orçamento de contexto atingido (%d de %d caracteres, "
-                    "%d páginas); parando de ler e resumindo o que já tem",
-                    chars_used, char_budget, len(pages_read),
-                )
+            if not admit(r, url, page):
                 return pages_read
-            pages_read.append((r, url, page))
-            chars_used += cost
+
+    for r, url, page in reserve:
+        if len(pages_read) >= budget:
+            break
+        r["_index"] = True
+        if not admit(r, url, page):
+            break
+        logger.info("_read_pages: vaga preenchida pela reserva: url=%s", url)
     return pages_read
 
 
@@ -479,7 +526,8 @@ def _render_dossier(pages_read: list[tuple[dict, str, str]]) -> str:
         f"Título: {r.get('title', '').strip()}\n"
         f"URL: {url}\n"
         f"Publicado em: {r.get('_date') or 'data não informada'}\n"
-        f"Resumo da busca: {r.get('content', '').strip()}\n"
+        + ("Tipo: capa/índice — lista de manchetes, não matéria apurada\n" if r.get("_index") else "")
+        + f"Resumo da busca: {r.get('content', '').strip()}\n"
         f"Conteúdo da página:\n{page}"
         for i, (r, url, page) in enumerate(pages_read, 1)
     )
@@ -502,7 +550,7 @@ def _build_dossier(query: str, recent: bool) -> tuple[str, list[tuple[dict, str,
     """Busca, lê e monta o dossiê. Separado de _summarize para o eval
     conseguir o dossiê sem repesquisar."""
     results = _collect_links(query, recent)
-    pages_read = _read_pages(results) if results else []
+    pages_read = _read_pages(results, index_first_class=recent) if results else []
     return _render_dossier(pages_read), pages_read
 
 
@@ -667,7 +715,7 @@ def research_web(query: str, recent: bool = False) -> str:
         _remember_result(query, outcome)
         return outcome
 
-    pages_read = _read_pages(results)
+    pages_read = _read_pages(results, index_first_class=recent)
     if not pages_read:
         logger.error("research_web: todas as %d páginas candidatas falharam para query=%r", len(results), query)
         outcome = _search_health_note(results) + "Nenhuma das páginas encontradas pôde ser lida."

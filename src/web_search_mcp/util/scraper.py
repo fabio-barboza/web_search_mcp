@@ -7,8 +7,9 @@ from urllib.parse import urlparse, urlsplit
 
 import lxml.etree
 import lxml.html
-import requests
 import trafilatura
+from curl_cffi import requests as curl_requests
+from curl_cffi.curl import CurlError
 
 from .. import config
 
@@ -41,7 +42,6 @@ _FAILURE_NOTICES = (
     "(URL bloqueada por segurança)",
     "(não foi possível ler a página",
     "(sem conteúdo extraível)",
-    "(página de índice: só links, sem conteúdo próprio)",
 )
 
 # Fração do texto que está dentro de <a> acima da qual a página é um índice
@@ -73,18 +73,21 @@ _BLOCK_TAGS = {
     "h4", "h5", "h6", "blockquote", "pre", "td", "th", "dt", "dd",
 }
 
-# Cabeçalhos de browser real. "Mozilla/5.0" sozinho é um UA truncado que não
-# corresponde a browser nenhum, e servidor com filtro de bot devolve 406 Not
-# Acceptable (medido em sejaceo.com: "Mozilla/5.0" = 406, UA completo = 200).
-# Accept/Accept-Language sem o UA completo não bastam: também dá 406.
-_BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-}
+# O download imita o Chrome inteiro, não só o User-Agent: o curl_cffi
+# reproduz a impressão TLS/HTTP2 do navegador, e é por ela que filtro de bot
+# (Cloudflare, Akamai) separa script de gente. UA de Chrome em cima da
+# impressão do `requests` era recusado mesmo assim. Medido em 10/09/2026,
+# mesmas URLs: requests x curl_cffi — noticias.uol.com.br 403 x 200,
+# glassdoor.com.br 403 x 200, britannica.com 403 x 200, bestbuy.com timeout
+# x 200; wikipedia, g1, reddit e gamespot 200 nos dois. Não passa desafio de
+# JavaScript (gamerguides, keengamer, yelp, ifood seguem 403): isso só com
+# navegador de verdade.
+#
+# O impersonate já manda UA e cabeçalhos coerentes com a impressão TLS;
+# trocar o UA por fora criaria a incoerência que o filtro procura. Só o
+# idioma é nosso.
+_IMPERSONATE = "chrome"
+_BROWSER_HEADERS = {"Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8"}
 
 
 def _is_chrome(el) -> bool:
@@ -126,21 +129,22 @@ class WebScraper:
         self.timeout = timeout
 
     def read_many_dated(
-        self, urls: list[str], reject_index: bool = False
-    ) -> list[tuple[str, str | None]]:
-        """read_many + a data de publicação de cada página, quando houver.
+        self, urls: list[str], mark_index: bool = False
+    ) -> list[tuple[str, str | None, bool]]:
+        """read_many + data de publicação + se a página é índice.
 
         Quem monta dossiê precisa da data: sem ela, matéria velha entra como
         se fosse de hoje. Medido: "previsão do tempo para os próximos 5 dias"
         trouxe uma matéria publicada uma semana antes e o resumo apresentou
         os dias 23-26 como sendo os próximos — errado, e sem nenhum sinal de
         que era material vencido.
-        """
-        return [(text, date) for text, date, _ in self._fetch(urls, reject_index)]
 
-    def read_many_located(
-        self, urls: list[str], reject_index: bool = False
-    ) -> list[tuple[str, str]]:
+        mark_index: marca (não descarta) página cuja maior parte do texto é
+        link — capa, seção, hub. Quem decide o que fazer é quem chama.
+        """
+        return [(text, date, index) for text, date, _, index in self._fetch(urls, mark_index)]
+
+    def read_many_located(self, urls: list[str]) -> list[tuple[str, str]]:
         """read_many + a URL final de cada página, depois dos redirects.
 
         Quem pediu uma URL específica precisa saber se caiu em outra. Um
@@ -150,22 +154,23 @@ class WebScraper:
         sinal não há condição de parada, e quem chamou fica chutando
         endereços e recebendo sempre a mesma página.
         """
-        return [(text, final) for text, _, final in self._fetch(urls, reject_index)]
+        return [(text, final) for text, _, final, _ in self._fetch(urls)]
 
     def _fetch(
-        self, urls: list[str], reject_index: bool = False
-    ) -> list[tuple[str, str | None, str]]:
-        """Baixa e extrai: (texto, data de publicação, URL final)."""
+        self, urls: list[str], mark_index: bool = False
+    ) -> list[tuple[str, str | None, str, bool]]:
+        """Baixa e extrai: (texto, data de publicação, URL final, é índice)."""
         if not urls:
             return []
         with ThreadPoolExecutor(max_workers=len(urls)) as pool:
             downloaded = list(pool.map(self._download, urls))
-        out: list[tuple[str, str | None, str]] = []
+        out: list[tuple[str, str | None, str, bool]] = []
         for (ok, html, final), requested in zip(downloaded, urls):
             if not ok:
-                out.append((html, None, final or requested))
+                out.append((html, None, final or requested, False))
                 continue
-            out.append((self._extract(html, reject_index), self._page_date(html), final))
+            index = mark_index and self.link_density(html) >= _MAX_LINK_DENSITY
+            out.append((self._extract(html), self._page_date(html), final, index))
         return out
 
     @staticmethod
@@ -177,7 +182,7 @@ class WebScraper:
             return None
         return getattr(meta, "date", None) if meta else None
 
-    def read_many(self, urls: list[str], reject_index: bool = False) -> list[str]:
+    def read_many(self, urls: list[str]) -> list[str]:
         """Lê várias URLs: download em paralelo, extração serial.
 
         Só o download é paralelizado. A extração roda no thread principal
@@ -186,7 +191,7 @@ class WebScraper:
         extração leva ~0,2s para 10 páginas em série contra ~0,2s em
         paralelo — não há nada a ganhar arriscando.
         """
-        return [text for text, _, _ in self._fetch(urls, reject_index)]
+        return [text for text, _, _, _ in self._fetch(urls)]
 
     def read(self, url: str) -> str:
         """Lê uma única URL."""
@@ -277,23 +282,22 @@ class WebScraper:
             logger.error("download bloqueado por segurança: url=%s", url)
             return False, "(URL bloqueada por segurança)", url
         try:
-            resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=self.timeout)
+            resp = curl_requests.get(
+                url, headers=_BROWSER_HEADERS, impersonate=_IMPERSONATE, timeout=self.timeout
+            )
             resp.raise_for_status()
-        except requests.RequestException as e:
+        # CurlError é a base de tudo que o curl_cffi levanta (rede, TLS,
+        # HTTPError do raise_for_status); curl_requests não exporta um
+        # RequestException no topo, e um nome errado aqui derrubava a
+        # pesquisa inteira no primeiro download que falhasse.
+        except CurlError as e:
             # Devolve texto em vez de levantar: uma página ruim não deve
             # derrubar a pesquisa inteira.
             logger.error("download falhou: url=%s erro=%s", url, e)
             return False, f"(não foi possível ler a página: {e})", url
         return True, resp.text, resp.url or url
 
-    def _extract(self, html: str, reject_index: bool = False) -> str:
-        # Índice não responde pergunta: o modelo lê manchete solta e serve
-        # chamada de capa como se fosse fato apurado, tudo sob uma fonte só.
-        # Só o research fora do panorama rejeita — o panorama LÊ capa de
-        # propósito, e o read_url/analyze_urls devolve a página que pediram.
-        if reject_index and self.link_density(html) >= _MAX_LINK_DENSITY:
-            return "(página de índice: só links, sem conteúdo próprio)"
-
+    def _extract(self, html: str) -> str:
         # trafilatura isola o conteúdo principal (sem menu/nav/rodapé/scripts).
         # favor_recall: páginas de dados (clima, cotação) põem o número em
         # widgets curtos, que o modo preciso descarta como boilerplate.
