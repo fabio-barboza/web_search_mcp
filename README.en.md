@@ -215,7 +215,7 @@ and starts anyway — `read_url` works without it, `research_web` and
 ### From GitHub (no clone needed)
 
 ```bash
-uvx --from git+https://github.com/fabio-barboza/web_search_mcp web-search-mcp
+uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0 web-search-mcp
 ```
 
 Registering in Claude Code:
@@ -224,18 +224,18 @@ Registering in Claude Code:
 claude mcp add web-search \
   -e SEARXNG_URL=http://localhost:8886 \
   -e MODEL_BASE_URL=http://localhost:8200/v1 \
-  -- uvx --from git+https://github.com/fabio-barboza/web_search_mcp web-search-mcp
+  -- uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0 web-search-mcp
 ```
 
 Installed this way, `.env` is not read: the whole configuration comes in
 through `-e` — see [Configuring the installed server](#configuring-the-installed-server).
-Without an `@ref` in the URL, it installs the tip of the `main` branch. To pin
-a version, append `@<branch, tag or commit>` after the repository name.
+`@v0.1.0` pins that release. Swap it for `@main` to always track the tip of
+the branch, or for any other tag or commit.
 
 To keep the command fixed on your PATH instead of resolving it on every run:
 
 ```bash
-uv tool install git+https://github.com/fabio-barboza/web_search_mcp
+uv tool install git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0
 ```
 
 ### From a clone (development)
@@ -297,7 +297,7 @@ Or installed, passing the configuration through the environment:
 ```bash
 SEARXNG_URL=http://localhost:8886 \
 MODEL_BASE_URL=http://localhost:8200/v1 \
-uvx --from git+https://github.com/fabio-barboza/web_search_mcp web-search-mcp --http
+uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0 web-search-mcp --http
 ```
 
 It listens on `http://{MCP_HOST}:{MCP_PORT}/mcp` (default `127.0.0.1:8765`).
@@ -344,7 +344,7 @@ Environment=TOR_CHANNELS=127.0.0.1:9060:9061,127.0.0.1:9070:9071,127.0.0.1:9080:
 Environment=SEARXNG_URL=http://localhost:8886
 # TOR_CONTROL_PASSWORD lives outside the unit, in a file only you can read (chmod 600)
 EnvironmentFile=%h/.config/web-search-mcp/secrets.env
-ExecStart=%h/.local/bin/uvx --from git+https://github.com/fabio-barboza/web_search_mcp web-search-mcp --http
+ExecStart=%h/.local/bin/uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0 web-search-mcp --http
 Restart=on-failure
 
 [Install]
@@ -574,7 +574,7 @@ claude mcp add web-search \
   -e MODEL_BASE_URL=http://localhost:8200/v1 \
   -e MODEL_CONTEXT_TOKENS=65536 \
   -e TZ=America/Sao_Paulo \
-  -- uvx --from git+https://github.com/fabio-barboza/web_search_mcp web-search-mcp
+  -- uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0 web-search-mcp
 ```
 
 Note that `MODEL` isn't there: left out, the server uses the model already
@@ -588,7 +588,7 @@ The command above writes this to `.mcp.json` (project scope) or to
   "mcpServers": {
     "web-search": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/fabio-barboza/web_search_mcp", "web-search-mcp"],
+      "args": ["--from", "git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0", "web-search-mcp"],
       "env": {
         "SEARXNG_URL": "http://localhost:8886",
         "MODEL_BASE_URL": "http://localhost:8200/v1"
