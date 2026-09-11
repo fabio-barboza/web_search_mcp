@@ -6,6 +6,7 @@ from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 
 from web_search_mcp import server
+from web_search_mcp.tools import research
 
 
 def _ctx(tool="research_web", session="s1"):
@@ -81,6 +82,26 @@ class TestChainGuard:
             out = _run(guard, tool, _ctx(tool="read_url"), t)
         assert out.content[0].text == "resultado"
         assert tool.calls == 10
+
+    def test_tool_sees_earlier_questions_of_the_same_turn_only(self):
+        seen = []
+
+        async def tool(context):
+            seen.append(research.chain_questions.get())
+            return ToolResult(content=[TextContent(type="text", text="r")])
+
+        def ctx(q, session="s1"):
+            c = _ctx(session=session)
+            c.message.arguments = {"query": q}
+            return c
+
+        guard = server._ChainGuard()
+        _run(guard, tool, ctx("pergunta A"), 0)
+        _run(guard, tool, ctx("pergunta B"), 5)
+        _run(guard, tool, ctx("outra sessão", session="s2"), 6)
+        _run(guard, tool, ctx("turno novo"), 5 + server._CHAIN_GAP_SECONDS + 1)
+        assert seen == [(), ("pergunta A",), (), ()]
+        assert research.chain_questions.get() == ()
 
     def test_registered_on_server(self):
         assert any(isinstance(m, server._ChainGuard) for m in server.mcp.middleware)

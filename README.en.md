@@ -387,7 +387,7 @@ to the origins you use, instead of leaving `*`.
 
 ## Tools
 
-### `research_web(query: str, recent: bool = False) -> str`
+### `research_web(query: str, recent: bool = False, *, user_message: str) -> str`
 
 Researches the question on the web (generates search variants — always
 including the question as keywords, names intact —, runs them in parallel,
@@ -406,6 +406,17 @@ list of URLs read goes at the end.
 Use `recent=True` only when the answer depends on today (weather, exchange
 rate, score, news). For stable facts (history, biography, concepts), leave
 `recent=False` — filtering by date throws away the best sources.
+
+`user_message` (required) is the user's latest message, copied verbatim.
+The calling agent often translates or swaps the name the user wrote before
+the very first search ("Pai Putrefato" becomes "Rotting Bride"). When the
+`query` lost a name that is in the message, the research also searches for
+the message's names and uses the original text in triage and summary. If
+the message just repeats the `query`, nothing changes. Measured on
+2026-09-11 with the Open WebUI agent (qwen3.8:27B): right answer in 10 of
+10 conversations, against 6 of 10 without the field, with fewer searches
+per conversation. As an optional field the agent filled it in only 9 of 20
+calls; that is why it is required.
 
 The same question rephrased right afterwards (same set of content words, in
 any order) returns the previous result instead of searching again: the tool
@@ -474,6 +485,8 @@ The full list, with each default:
 | `MODEL_CONTEXT_TOKENS` | `65536` | Model context window, from which the dossier budget is derived. With llama.cpp/llama-swap the server reads the loaded model's real `--ctx-size` from `GET /models` on every search, and that value wins; this variable is the fallback for providers that don't expose it. With those, **it must match the real window**: declaring more makes the provider reject the call with HTTP 400 and the whole search is lost, after search and scraping were already paid for |
 | `MODEL_RESERVE_TOKENS` | `4096` | How much of the window is reserved for what isn't dossier: instructions, question and the answer the model still has to generate. The dossier budget is `MODEL_CONTEXT_TOKENS - MODEL_RESERVE_TOKENS` |
 | `EXTRA_BODY` | *(empty)* | Raw JSON merged into the `/chat/completions` payload, for parameters only your provider understands. E.g. turning off reasoning on Qwen3: `EXTRA_BODY={"chat_template_kwargs": {"enable_thinking": false}}`. Invalid JSON crashes the server at boot, on purpose |
+| `USE_REASONING` | `false` | `true` turns on short reasoning only on the calls that decide quality: result triage, the summary and `analyze_urls`. The others (search variants, bridge picker) keep `EXTRA_BODY` alone. Measured with qwen3.8:27B, 10 questions × 2 rounds, blind grading: +5 points and ~+30 s per search |
+| `REASONING_BODY` | *(empty)* | JSON that turns reasoning on for your model, merged over `EXTRA_BODY` when `USE_REASONING=true`. Empty = the Qwen3.x format on llama.cpp: `{"chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "low"}}` |
 | `EXTRA_SYSTEM_PROMPT` | *(empty)* | Text appended to the end of the system prompt on every call. It exists because not every model turns reasoning off via an API parameter — some only obey an instruction. E.g. `EXTRA_SYSTEM_PROMPT=Reasoning strength: low`. Worth it: on a model that thinks by default, generating 3 search lines cost 2767 tokens / 39 s without it, versus 271 / 3 s with it |
 
 ### Search (Google CSE via Tor)

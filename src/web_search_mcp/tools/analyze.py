@@ -100,6 +100,7 @@ def analyze_urls(urls: list[str], request: str = "Resuma o conteúdo.") -> str:
     analysis = chat(
         system=_INSTRUCTION,
         user=f"Pedido: {request or 'Resuma o conteúdo.'}\n\nMaterial:\n\n{dossier}",
+        reasoning=True,
     )
 
     sources = "\n".join(f"- {u}" for u in read_ok)

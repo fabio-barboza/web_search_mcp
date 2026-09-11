@@ -58,6 +58,31 @@ if _extra_body_raw:
 else:
     EXTRA_BODY = {}
 
+# REASONING_BODY: mesclado POR CIMA do EXTRA_BODY (chave de topo substitui a
+# do EXTRA_BODY inteira) só nas chamadas que decidem a qualidade da resposta:
+# triagem dos resultados (_rerank), resumo (_summarize) e analyze_urls. As
+# curtas (variantes de busca, seletor da ponte) ficam só com EXTRA_BODY.
+# Medido em 11/09/2026, qwen3.8:27B, 10
+# perguntas x 2 rodadas alternadas, notas cegas: raciocínio "low" em TODAS as
+# chamadas deu +4,5 pontos (venceu 18 de 20) e +34 s por pesquisa (40 -> 74 s);
+# a triagem também ganha (leu a doc oficial que sem raciocínio não lia). Só
+# nessas três chamadas, mesmo desenho: +5,25 pontos (86,0 -> 91,25, 18 de 20)
+# e +30 s (40,0 -> 69,7 s) — o custo está onde está o ganho.
+# USE_REASONING liga isso (padrão false: nenhuma chamada raciocina).
+# REASONING_BODY diz COMO ligar no seu modelo; vazio usa o formato do chat
+# template do Qwen3.x servido pelo llama.cpp (o medido acima). Outro modelo
+# pede outra chave — ex. um que só aceite enable_thinking:
+# REASONING_BODY={"chat_template_kwargs": {"enable_thinking": true}}
+USE_REASONING = os.getenv("USE_REASONING", "false").strip().lower() in ("1", "true", "yes", "on")
+_reasoning_body_raw = os.getenv("REASONING_BODY", "").strip()
+if _reasoning_body_raw:
+    try:
+        REASONING_BODY = json.loads(_reasoning_body_raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"REASONING_BODY não é JSON válido: {e}") from e
+else:
+    REASONING_BODY = {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "low"}}
+
 # EXTRA_SYSTEM_PROMPT: texto apenso ao final do system prompt em toda chamada.
 # Não cabe em EXTRA_BODY porque não é payload da API, é conteúdo de mensagem
 # — ex. muse-glimmer: EXTRA_SYSTEM_PROMPT="Reasoning strength: low"

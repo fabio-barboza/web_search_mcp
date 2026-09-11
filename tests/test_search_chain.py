@@ -80,7 +80,7 @@ class TestHealthNote:
     def test_research_web_reports_search_error(self, monkeypatch):
         monkeypatch.setattr(research, "_search", SearchChain(_google(down=True), None))
         with patch.object(research, "_generate_queries", return_value=["pergunta sem fallback"]):
-            out = research.research_web("pergunta sem fallback")
+            out = research.research_web("pergunta sem fallback", user_message="pergunta sem fallback")
         assert out.startswith("Erro ao consultar a busca")
 
 

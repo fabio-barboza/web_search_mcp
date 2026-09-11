@@ -17,7 +17,7 @@ from starlette.middleware.cors import CORSMiddleware
 from . import config
 from .tools.analyze import analyze_urls
 from .tools.read_url import read_url
-from .tools.research import research_web
+from .tools.research import chain_questions, research_web
 
 mcp = FastMCP(
     config.MCP_NAME,
@@ -78,6 +78,11 @@ class _ChainGuard(MCPMiddleware):
     def __init__(self) -> None:
         # sessão → (quando a última chamada devolveu, tamanho da cadeia)
         self._chains: dict[str, tuple[float, int]] = {}
+        # sessão → perguntas de research_web desta cadeia, em ordem. Vão para
+        # research.chain_questions: quando o agente reescreve a pergunta e
+        # troca o nome do usuário por um palpite, a pesquisa ainda enxerga o
+        # nome que ele tinha passado antes (research._carried_from_chain).
+        self._asked: dict[str, list[str]] = {}
 
     def _session(self, context: MiddlewareContext) -> str:
         try:
@@ -97,9 +102,12 @@ class _ChainGuard(MCPMiddleware):
         # cadeia.
         length = length + 1 if now - last_end <= _CHAIN_GAP_SECONDS else 1
         self._chains[sid] = (now, length)
+        if length == 1:
+            self._asked[sid] = []
         if len(self._chains) > 200:
             oldest = min(self._chains, key=lambda k: self._chains[k][0])
             del self._chains[oldest]
+            self._asked.pop(oldest, None)
 
         if length >= _CHAIN_HARD:
             logger.warning("_ChainGuard: sessão %s, chamada %d encadeada de %s barrada",
@@ -107,7 +115,15 @@ class _ChainGuard(MCPMiddleware):
             self._chains[sid] = (time.monotonic(), length)
             return ToolResult(content=[TextContent(type="text", text=_chain_stop_note(length))])
 
-        result = await call_next(context)
+        asked = self._asked.setdefault(sid, [])
+        token = chain_questions.set(tuple(asked))
+        try:
+            result = await call_next(context)
+        finally:
+            chain_questions.reset(token)
+        query = (getattr(context.message, "arguments", None) or {}).get("query")
+        if context.message.name == "research_web" and isinstance(query, str):
+            asked.append(query)
         self._chains[sid] = (time.monotonic(), length)
         if length >= _CHAIN_SOFT:
             logger.warning("_ChainGuard: sessão %s, chamada %d encadeada de %s",

@@ -3,6 +3,7 @@ import re
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
@@ -105,6 +106,7 @@ def _format_offset(dt: datetime) -> str:
 
 
 _KEYWORD_TOKEN_RE = re.compile(r"[\w'’.+#/-]+")
+_PARENTHETICAL_RE = re.compile(r"\([^()]*\)")
 
 
 def _keyword_query(question: str) -> str:
@@ -116,7 +118,16 @@ def _keyword_query(question: str) -> str:
     de BG3?" trouxe 1 resultado do assunto e 9 PDFs acadêmicos; a mesma
     pergunta em palavras-chave trouxe ~10 do assunto. "" quando não sobra
     nada que a distinga da pergunta (pergunta já curta).
+
+    O que está entre parênteses fica de fora: é aparte, e com frequência é o
+    palpite do agente que chamou. Observado em 11/09/2026 no Open WebUI:
+    "...do Pai Putrefato (Rotting Father) no Ato 3" virava uma busca com os
+    dois nomes, que nenhuma página tem juntos, e o pool veio sem nenhum
+    resultado com o nome do usuário. O parêntese não se perde: a pergunta
+    inteira continua sendo a primeira busca, e as variantes do LLM fazem uma
+    busca por nome (_QUERIES_INSTRUCTION).
     """
+    question = _PARENTHETICAL_RE.sub(" ", question)
     kept = []
     for i, token in enumerate(_KEYWORD_TOKEN_RE.findall(question)):
         # Só no fim: "BG3." perde o ponto, ".NET" continua ".NET".
@@ -155,7 +166,18 @@ def _name_phrases(question: str) -> list[str]:
     casa com qualquer texto em português, "Pai Putrefato" não. Pergunta sem
     nome ("qual a cotação do dólar") devolve vazio.
     """
-    tokens = [t.rstrip(".'’/-") for t in _KEYWORD_TOKEN_RE.findall(question)]
+    matches = list(_KEYWORD_TOKEN_RE.finditer(question))
+    tokens = [m.group().rstrip(".'’/-") for m in matches]
+    # Pontuação entre dois tokens separa nomes. O agente que chama escreve
+    # "Pai Putrefato (Rotting Father)", e o parêntese não é token: sem este
+    # corte saía uma frase só, "Pai Putrefato Rotting Father", que não está
+    # em página nenhuma — a ponte não achava candidato e não disparava
+    # (observado em 11/09/2026 no Open WebUI). Vale para "X, Y", "X / Y",
+    # "X: Y" e fim de frase: é mecânica de escrita, não assunto.
+    broken = [
+        i > 0 and bool(question[matches[i - 1].start() + len(tokens[i - 1]):m.start()].strip())
+        for i, m in enumerate(matches)
+    ]
     is_name = [
         bool(t) and (
             (i > 0 and t[0].isupper())
@@ -163,9 +185,21 @@ def _name_phrases(question: str) -> list[str]:
         )
         for i, t in enumerate(tokens)
     ]
+    # A primeira palavra tem maiúscula de qualquer jeito, então sozinha não
+    # diz nada; emendada num nome, faz parte dele ("Baldur's Gate 3 como...",
+    # "Santos Dumont inventou..."). Sem isso a frase era "Gate", e a ponte
+    # buscava "Trumbo Gate". Palavra de função nunca entra ("Onde Anitta").
+    if (
+        len(tokens) > 1 and tokens[0][:1].isupper() and is_name[1] and not broken[1]
+        and _fold(tokens[0]) not in _STOPWORDS
+    ):
+        is_name[0] = True
     phrases: list[str] = []
     run: list[str] = []
     for i, token in enumerate(tokens):
+        if run and broken[i]:
+            phrases.append(" ".join(run))
+            run = []
         if is_name[i]:
             run.append(token)
         elif run and _fold(token) in _NAME_CONNECTORS and i + 1 < len(tokens) and is_name[i + 1]:
@@ -175,7 +209,12 @@ def _name_phrases(question: str) -> list[str]:
             run = []
     if run:
         phrases.append(" ".join(run))
-    return phrases
+    # Sem repetição: com a pergunta anterior do turno como contexto, o mesmo
+    # nome aparece duas vezes e ia duas vezes para a âncora da ponte.
+    unique: dict[str, str] = {}
+    for p in phrases:
+        unique.setdefault(_fold(p), p)
+    return list(unique.values())
 
 
 def _mentions(phrase: str, folded_text: str) -> bool:
@@ -211,16 +250,37 @@ def _generate_queries(question: str) -> list[str]:
     # a regra no prompt, 2 de 3 variantes ainda trocavam o nome da pergunta
     # por uma tradução inventada e voltavam com 0 resultados).
     queries = [question]
-    keywords = _keyword_query(question)
-    if keywords:
-        variants = [keywords, *variants]
-    for v in variants:
+    built = [q for q in (_keyword_query(question), _names_query(question)) if q]
+    for v in [*built, *variants]:
         if v.lower() not in {q.lower() for q in queries}:
             queries.append(v)
-    # 5 = original + 4 variantes. O teto de 4 cortava a última busca gerada
-    # em pergunta ampla, e o ângulo perdido não voltava por leitura melhor
-    # das páginas: o que não vira busca não existe no resultado.
-    return queries[:5]
+    # 5 = original + 4 variantes (a de palavras-chave conta como uma). O
+    # teto de 4 cortava a última busca gerada em pergunta ampla, e o ângulo
+    # perdido não voltava por leitura melhor das páginas: o que não vira
+    # busca não existe no resultado. A busca de nomes não toma a vaga de uma
+    # variante do LLM, então o teto cresce com ela.
+    return queries[: 5 + (len(built) > 1)]
+
+
+def _names_query(question: str) -> str:
+    """Só as frases-nome da pergunta, fora de parênteses. "" se não compensa.
+
+    A forma em palavras-chave ainda leva todo termo de conteúdo, e o Google
+    exige todos: medido em 11/09/2026, "Baldur's Gate 3 iniciar quest
+    cadeia Pai Putrefato Ato 3" trouxe 3 resultados, nenhum com o nome;
+    "Baldur's Gate 3 Pai Putrefato" trouxe 20, 11 com o nome. As variantes
+    do LLM não cobrem isso quando a pergunta chega com um palpite entre
+    parênteses: as três repetiram o palpite. É também o que dá à ponte
+    (_bridge) candidatos com o nome da pergunta para achar coocorrência.
+
+    Precisa de pelo menos duas palavras de nome: um nome solto ("Brasil" em
+    "notícias do Brasil e do mundo") vira busca genérica que só dilui o pool.
+    """
+    phrases = _name_phrases(_PARENTHETICAL_RE.sub(" ", question))
+    names = " ".join(phrases)
+    if len(names.split()) < 2:
+        return ""
+    return names
 
 
 # Parâmetros de tracking: não mudam o conteúdo da página, só a string da
@@ -301,12 +361,15 @@ def _search_one_safe(args: tuple[str, bool]) -> list[dict]:
         return []
 
 
-def _collect_links(query: str, recent: bool) -> list[dict]:
+def _collect_links(query: str, recent: bool, carried: tuple[str, ...] = ()) -> list[dict]:
     """Roda várias buscas em paralelo e mescla os resultados.
 
     A busca da pergunta original não espera o LLM: ela já é conhecida antes
     de gerar variante nenhuma. Rodar as duas coisas ao mesmo tempo esconde a
     latência da geração de queries atrás da rede do SearXNG.
+
+    carried: buscas de nomes que uma chamada anterior do mesmo turno tinha e
+    esta perdeu (_carried_from_chain).
     """
     with ThreadPoolExecutor(max_workers=2) as pool:
         original = pool.submit(_search_one, (query, recent))
@@ -317,6 +380,7 @@ def _collect_links(query: str, recent: bool) -> list[dict]:
     # _generate_queries devolve a pergunta original em primeiro lugar; ela já
     # foi buscada acima, então aqui só faltam as variantes.
     extras = [q for q in queries if q != query]
+    extras += [c for c in carried if c.lower() not in {q.lower() for q in queries}]
     if extras:
         with ThreadPoolExecutor(max_workers=len(extras)) as pool:
             per_query = list(pool.map(_search_one_safe, [(q, recent) for q in extras]))
@@ -755,6 +819,7 @@ def _rerank(query: str, candidates: list[dict], k: int) -> list[dict] | None:
         content = chat(
             system=_RERANK_INSTRUCTION.format(k=k),
             user=f"Pergunta: {query}\n\nResultados:\n" + "\n".join(lines),
+            reasoning=True,
         )
     except Exception as e:
         logger.error("_rerank: LLM falhou, seguindo na ordem do merge: %s", e)
@@ -814,7 +879,9 @@ _BRIDGE_MIN_TERM_CHARS = 3
 _BRIDGE_TOKEN_RE = re.compile(r"[^\W\d_][\w'’-]*")
 
 
-def _bridge_terms(missing: list[str], pool: list[dict], question: str) -> list[str]:
+def _bridge_terms(
+    missing: list[str], pool: list[dict], question: str, limit: int = _BRIDGE_MAX_TERMS
+) -> list[str]:
     """Palavras que andam com as frases-nome sem página, corroboradas e raras no pool."""
     texts = [_fold(f"{r.get('title', '')} {r.get('content', '')}") for r in pool]
     holders = [
@@ -855,66 +922,162 @@ def _bridge_terms(missing: list[str], pool: list[dict], question: str) -> list[s
     # que passam, o menos espalhado é o mais específico do nome. Por
     # frequência decrescente, a palavra comum ganhava do nome ("SAVE" > "Trumbo").
     ranked = sorted(found.values(), key=lambda item: item[0])
-    return [token for _, token in ranked[:_BRIDGE_MAX_TERMS]]
+    return [token for _, token in ranked[:limit]]
+
+
+# Escolha do termo de ligação entre os candidatos da estatística.
+#
+# Contagem sozinha não separa nome de palavra comum quando tudo aparece 2
+# vezes. Medido em 11/09/2026 em 10 pools reais da mesma pergunta: "Trumbo"
+# (o nome que liga os dois lados) empatava com "Comments", "Act",
+# "Encontre" e "Episódio" — texto de interface do site, começo de título,
+# número de parte — e a ponte gastou as duas buscas nelas em 7 dos 10. Ler
+# os trechos distingue; contar não. O LLM só escolhe um número da lista, e a
+# lista vem do pool: ele não tem como pôr na busca um nome que não está lá.
+_BRIDGE_PICK_INSTRUCTION = (
+    "Uma pergunta usa um nome que as páginas lidas não usam. Você recebe "
+    "esse nome, trechos de resultados de busca que o citam e uma lista "
+    "numerada de palavras que aparecem junto dele nesses trechos. Devolva os "
+    "números das palavras que são nome próprio de algo ligado ao nome da "
+    "pergunta (pessoa, lugar, objeto, obra, organização) e que, buscadas, "
+    "levariam a páginas sobre ele. Descarte palavra comum que só está com "
+    "maiúscula por estar num título, e texto do próprio site ou da página "
+    "(contagem, navegação, numeração). No máximo {k} números, um por linha, "
+    "sem explicar; 0 se nenhuma servir."
+)
+_BRIDGE_CANDIDATES = 8
+_BRIDGE_EVIDENCE = 3
+
+
+def _pick_bridge_terms(missing: list[str], holders: list[dict], candidates: list[str]) -> list[str]:
+    """Candidatos que o LLM julga nome ligado à frase; a ordem da estatística se ele falhar."""
+    if len(candidates) <= 1:
+        return candidates
+    snippets = "\n".join(
+        f"- {(r.get('title') or '').strip()[:_RERANK_TITLE_CHARS]} — "
+        f"{(r.get('content') or '').strip()[:_RERANK_SNIPPET_CHARS]}"
+        for r in holders[:12]
+    )
+    listed = "\n".join(f"[{i}] {c}" for i, c in enumerate(candidates, 1))
+    try:
+        content = chat(
+            system=_BRIDGE_PICK_INSTRUCTION.format(k=_BRIDGE_MAX_TERMS),
+            user=f"Nome: {' / '.join(missing)}\n\nTrechos:\n{snippets}\n\nPalavras:\n{listed}",
+        )
+    except Exception as e:
+        logger.error("_pick_bridge_terms: LLM falhou, seguindo a ordem da estatística: %s", e)
+        return candidates[:_BRIDGE_MAX_TERMS]
+    picked: list[str] = []
+    for token in re.findall(r"\d+", content):
+        n = int(token)
+        if n == 0 and not picked:
+            return []
+        if 1 <= n <= len(candidates) and candidates[n - 1] not in picked:
+            picked.append(candidates[n - 1])
+        if len(picked) >= _BRIDGE_MAX_TERMS:
+            break
+    return picked or candidates[:_BRIDGE_MAX_TERMS]
 
 
 def _bridge(
-    query: str, recent: bool, pool: list[dict], pages_read: list[tuple[dict, str, str]]
-) -> list[tuple[dict, str, str]]:
-    """Páginas extras quando uma frase-nome da pergunta não aparece em nada lido."""
-    phrases = _name_phrases(query)
+    query: str, recent: bool, pool: list[dict], pages_read: list[tuple[dict, str, str]],
+    names: list[str] | None = None,
+) -> tuple[list[tuple[dict, str, str]], list[dict]]:
+    """Quando uma frase-nome da pergunta não aparece em nada lido: (páginas
+    extras, resultados do pool que mostram a ligação entre os dois nomes).
+
+    names: as frases-nome a procurar, quando quem chama sabe melhor que o
+    texto da pergunta quais são (_carried_from_user). None = as de query.
+    """
+    phrases = names if names is not None else _name_phrases(query)
     if not phrases or not pages_read:
-        return []
+        return [], []
     read_text = _fold("\n".join(page for _, _, page in pages_read))
     missing = [p for p in phrases if not _mentions(p, read_text)]
     if not missing:
-        return []
-    terms = _bridge_terms(missing, pool, query)
-    if not terms:
+        return [], []
+    candidates = _bridge_terms(missing, pool, query, limit=_BRIDGE_CANDIDATES)
+    if not candidates:
         logger.info("_bridge: %r sem página lida e sem termo de ligação no pool", missing)
-        return []
+        return [], []
+    holders = [
+        r for r in pool
+        if any(_mentions(p, _fold(f"{r.get('title', '')} {r.get('content', '')}")) for p in missing)
+    ]
+    terms = _pick_bridge_terms(missing, holders, candidates)
+    if not terms:
+        logger.info("_bridge: %r sem página lida; nenhum dos candidatos %r serve", missing, candidates)
+        return [], []
+
+    # A prova da ligação: o resultado que cita o nome da pergunta junto com o
+    # termo. Sem ela no dossiê, o resumo lia as páginas certas (que só usam
+    # o outro nome) e negava a pergunta, porque a instrução manda só afirmar
+    # identidade que o material mostra — medido em 11/09/2026, 3 de 3
+    # execuções com Mystic Carrion e Thrumbo lidos e resposta "não contém".
+    read = {_normalize_url(url) for _, url, _ in pages_read}
+    evidence = [
+        r for r in holders
+        if _normalize_url(r.get("url", "")) not in read
+        and any(_mentions(t, _fold(f"{r.get('title', '')} {r.get('content', '')}")) for t in terms)
+    ][:_BRIDGE_EVIDENCE]
+
     present = [p for p in phrases if p not in missing]
-    anchor = " ".join(present) if present else missing[0]
+    # Palavra solta com maiúscula que as páginas lidas escrevem em minúscula
+    # é palavra comum que o autor da pergunta capitalizou, não nome: fica fora
+    # da âncora. Medido em 11/09/2026, o agente escreveu "no Ato 3" e a busca
+    # "Trumbo Baldur's Gate Ato" trouxe 5 de 20 resultados do assunto;
+    # "Trumbo Baldur's Gate", 18 de 20. Nome de verdade não aparece em
+    # minúscula; frase de várias palavras e token com dígito ficam sempre.
+    raw_read = "\n".join(page for _, _, page in pages_read)
+    named = [
+        p for p in present
+        if " " in p or any(c.isdigit() for c in p)
+        or not re.search(r"(?<!\w)" + re.escape(p.lower()) + r"(?!\w)", raw_read)
+    ]
+    anchor = " ".join(named or present) if present else missing[0]
     queries = [f"{term} {anchor}" for term in terms]
-    logger.info("_bridge: %r sem página lida; termos %r; buscas %r", missing, terms, queries)
+    logger.info("_bridge: %r sem página lida; candidatos %r; termos %r; buscas %r",
+                missing, candidates, terms, queries)
 
     with ThreadPoolExecutor(max_workers=len(queries)) as ex:
         per_query = list(ex.map(_search_one_safe, [(q, recent) for q in queries]))
     # Só o que já foi LIDO sai. Página do pool que a triagem deixou de fora
     # fica: é o caso que a ponte existe para resolver (bg3.wiki/Mystic_Carrion
     # estava no pool, sem leitura).
-    read = {_normalize_url(url) for _, url, _ in pages_read}
     fresh = [r for r in _merge_results(per_query, domain_cap=0) if _normalize_url(r.get("url", "")) not in read]
     if not fresh:
-        return []
+        return [], evidence
     picks = _rerank(query, fresh, _BRIDGE_PAGES + _RERANK_SLACK) or fresh
     used = sum(_page_cost(r, url, page) for r, url, page in pages_read)
     remaining = _dossier_char_budget() - used
     if remaining <= 0:
-        return []
+        return [], evidence
     extra = _read_pages(
         _cap_per_domain(picks), page_budget=_BRIDGE_PAGES,
         index_first_class=recent, char_budget=remaining,
     )
-    logger.info("_bridge: %d página(s) extra(s): %r", len(extra), [url for _, url, _ in extra])
-    return extra
+    logger.info("_bridge: %d página(s) extra(s): %r; %d trecho(s) de ligação",
+                len(extra), [url for _, url, _ in extra], len(evidence))
+    return extra, evidence
 
 
 def _select_and_read(
-    query: str, results: list[dict], recent: bool
+    query: str, results: list[dict], recent: bool, names: list[str] | None = None
 ) -> tuple[list[tuple[dict, str, str]], list[dict]]:
     """Triagem + leitura. Devolve (páginas lidas, escolhidos que não abriram).
 
     Só os escolhidos são lidos: o que a triagem deixou de fora foi julgado de
     outro assunto, e lê-lo só dilui o dossiê e alonga o prefill. A ordem do
-    merge volta inteira apenas quando nenhum escolhido abre.
+    merge volta inteira apenas quando nenhum escolhido abre. names vai para a
+    ponte (_bridge).
     """
     if not results:
         return [], []
     picks = _rerank(query, results, config.RESEARCH_PAGE_BUDGET + _RERANK_SLACK)
     if picks is None:
         pages_read = _read_pages(_cap_per_domain(results), index_first_class=recent)
-        return _bridge(query, recent, results, pages_read) + pages_read, []
+        bridged, evidence = _bridge(query, recent, results, pages_read, names)
+        return bridged + _snippet_sources(evidence) + pages_read, []
     # O teto de domínio vale na ordem da triagem: entre páginas do mesmo site
     # ficam as julgadas mais úteis, não as que o merge viu primeiro.
     picks = _cap_per_domain(picks)
@@ -929,8 +1092,12 @@ def _select_and_read(
     # Páginas da ponte na frente: são as que contêm o nome que faltava. No
     # fim do dossiê, depois de 6 páginas que "não mencionam a missão", o
     # resumo negou a pergunta mesmo com elas lidas (medido em 10/09/2026).
-    bridged = _bridge(query, recent, results, pages_read)
-    return bridged + pages_read, unread[:_SNIPPET_SOURCES_MAX]
+    # Os trechos de ligação vêm logo depois, antes das páginas: são eles que
+    # dizem ao resumo que o nome da pergunta e o das páginas são a mesma coisa.
+    bridged, evidence = _bridge(query, recent, results, pages_read, names)
+    shown = {r.get("url", "").strip() for r in evidence}
+    unread = [r for r in unread if r.get("url", "").strip() not in shown]
+    return bridged + _snippet_sources(evidence) + pages_read, unread[:_SNIPPET_SOURCES_MAX]
 
 
 def _snippet_sources(unread: list[dict]) -> list[tuple[dict, str, str]]:
@@ -963,6 +1130,7 @@ def _summarize(query: str, dossier: str, recent: bool) -> str:
             f"{_format_offset(now)}. {_BASE_INSTRUCTION} {context}"
         ),
         user=f"Pergunta: {query}\n\nMaterial coletado:\n\n{dossier}",
+        reasoning=True,
     )
 
 
@@ -1059,7 +1227,72 @@ def _remember_result(query: str, result: str) -> None:
     _recent_calls[_repeat_key(query)] = (time.monotonic(), result)
 
 
-def research_web(query: str, recent: bool = False) -> str:
+# Perguntas que o agente já passou a research_web neste mesmo turno, da mais
+# antiga para a mais recente. Quem preenche é server._ChainGuard (mesma
+# sessão MCP, chamada logo depois da anterior); fora dele fica vazio e nada
+# muda. O FastMCP roda a ferramenta com anyio.to_thread, que leva o contexto.
+chain_questions: ContextVar[tuple[str, ...]] = ContextVar("chain_questions", default=())
+
+
+def _carried_from_chain(query: str, earlier: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
+    """(pergunta anterior que vale como contexto, buscas de nomes dela) ou ("", ()).
+
+    O agente que chama, quando a primeira pesquisa não acha, reescreve a
+    pergunta e troca o nome do usuário por um palpite próprio. Observado em
+    11/09/2026 no Open WebUI: "…do Pai Putrefato (Rotting Father) no Ato 3"
+    virou "Baldur's Gate 3 Act 3 quest Rotting Father chain how to start" —
+    o nome que existia sumiu, e o que sobrou não existe em página nenhuma.
+    O MCP não vê a conversa, mas vê as chamadas do turno.
+
+    Só quando é a MESMA pergunta reescrita: a nova divide pelo menos um nome
+    com uma anterior (mesmo assunto) e perdeu outro nome dela (troca).
+    Pergunta sobre outra coisa no mesmo turno ("Tia Ciata", depois
+    "Pixinguinha") não divide nome e segue intocada. Sinal de forma, nunca
+    de assunto.
+    """
+    current = {_fold(p) for p in _name_phrases(query)}
+    if not current:
+        return "", ()
+    for prior in earlier:
+        names = {_fold(p) for p in _name_phrases(_PARENTHETICAL_RE.sub(" ", prior))}
+        if names & current and names - current:
+            names_query = _names_query(prior)
+            return prior, ((names_query,) if names_query else ())
+    return "", ()
+
+
+# Guarda de tamanho, não medida: a mensagem vai inteira como contexto para a
+# triagem, a ponte e o resumo, e um texto longo colado pelo usuário estouraria
+# o contexto do resumo (HTTP 400 joga fora a pesquisa inteira).
+_USER_MESSAGE_MAX_CHARS = 2000
+
+
+def _carried_from_user(query: str, user_message: str) -> tuple[str, tuple[str, ...]]:
+    """(mensagem do usuário que vale como contexto, busca dos nomes dela) ou ("", ()).
+
+    O agente que chama traduz ou troca o nome que o usuário escreveu antes
+    mesmo da primeira pesquisa. Medido em 11/09/2026 (qwen3.8:27B com os
+    parâmetros do Open WebUI, só a 1ª chamada, 20 por braço): a query manteve
+    o nome do usuário em 7/20 ("Rotting Bride", "Rotten Brain" no lugar de
+    "Pai Putrefato"); com user_message obrigatório no esquema, o campo veio
+    literal em 20/20. Opcional ele veio em 9/20 — por isso é obrigatório.
+
+    Diferente de _carried_from_chain, não exige nome em comum: a mensagem é
+    a do turno atual, então é a mesma pergunta por definição, e a query
+    traduzida pode não dividir nome nenhum com ela. Basta a query ter
+    perdido uma frase-nome da mensagem. Quando a mensagem só repete a query
+    (agente que obedece), nada muda. Sinal de forma, nunca de assunto.
+    """
+    message = " ".join((user_message or "").split())[:_USER_MESSAGE_MAX_CHARS]
+    folded_query = _fold(query)
+    names = _name_phrases(_PARENTHETICAL_RE.sub(" ", message))
+    if not any(not _mentions(p, folded_query) for p in names):
+        return "", ()
+    names_query = _names_query(message)
+    return message, ((names_query,) if names_query else ())
+
+
+def research_web(query: str, recent: bool = False, *, user_message: str) -> str:
     """Pesquisa na web e devolve um resumo com fontes.
 
     Use para qualquer informação que você não saiba com certeza — e também
@@ -1095,17 +1328,40 @@ def research_web(query: str, recent: bool = False) -> str:
             (clima, cotação, placar, notícia de agora). False para fatos
             estáveis (história, biografia, conceitos, documentação), pois
             filtrar por data descarta as fontes boas.
+        user_message: A última mensagem do usuário, copiada literalmente, do jeito que ele
+            escreveu: sem traduzir, sem corrigir, sem resumir.
     """
-    logger.info("research_web chamada: query=%r recent=%s", query, recent)
+    logger.info("research_web chamada: query=%r recent=%s user_message=%r", query, recent, user_message)
 
     cached = _cached_result(query)
     if cached is not None:
         logger.warning("research_web: repetição detectada, devolvendo resultado anterior: query=%r", query)
         return _REPEAT_NOTE + cached
 
+    # Query que perdeu um nome da mensagem do usuário, ou pergunta reescrita
+    # no mesmo turno: o texto de origem entra como contexto na triagem, na
+    # ponte e no resumo, e a busca pelos nomes dele roda junto. O rótulo do
+    # parêntese vai em minúscula para não virar frase-nome.
+    prior, carried = _carried_from_user(query, user_message)
+    label = "mensagem do usuário"
+    # A ponte procura só os nomes que o usuário escreveu. Nome que está na
+    # query e não na mensagem é palpite do agente — mesma regra do palpite
+    # entre parênteses. Medido em 11/09/2026 (40 conversas simuladas): com os
+    # nomes do texto inteiro, a ponte caçou "Rotting Bride", "The Rotfather"
+    # e "Rotten Brain", escolheu "Bhaal", "Warhammer", "Mizora" como ligação
+    # e leu essas páginas na frente; e a 1ª palavra da mensagem entre aspas
+    # ("Como") virava frase-nome.
+    names = _name_phrases(_PARENTHETICAL_RE.sub(" ", prior)) if prior else None
+    if not prior:
+        prior, carried = _carried_from_chain(query, chain_questions.get())
+        label = "pergunta anterior nesta conversa"
+    asked = f'{query}\n({label}: "{prior}")' if prior else query
+    if prior:
+        logger.info("research_web: query perdeu nome (%s); contexto %r, buscas %r", label, prior, carried)
+
     _search.reset_health()
     try:
-        results = _collect_links(query, recent)
+        results = _collect_links(query, recent, carried)
     except requests.RequestException as e:
         logger.error("research_web: busca falhou para query=%r: %s", query, e)
         return f"Erro ao consultar a busca: {e}"
@@ -1121,7 +1377,7 @@ def research_web(query: str, recent: bool = False) -> str:
         _remember_result(query, outcome)
         return outcome
 
-    pages_read, unread = _select_and_read(query, results, recent)
+    pages_read, unread = _select_and_read(asked, results, recent, names=names)
     if not pages_read:
         logger.error("research_web: todas as %d páginas candidatas falharam para query=%r", len(results), query)
         outcome = _search_health_note(results) + "Nenhuma das páginas encontradas pôde ser lida."
@@ -1133,7 +1389,7 @@ def research_web(query: str, recent: bool = False) -> str:
     pages_read = pages_read + _snippet_sources(unread)
     dossier = _render_dossier(pages_read)
     try:
-        summary = _summarize(query, dossier, recent)
+        summary = _summarize(asked, dossier, recent)
     except Exception as e:
         # As páginas já foram lidas e custaram a rede toda; devolver exceção
         # aqui joga esse trabalho fora e deixa o agente que chamou sem nada

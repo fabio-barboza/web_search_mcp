@@ -376,7 +376,7 @@ em vez de deixar `*`.
 
 ## Tools
 
-### `research_web(query: str, recent: bool = False) -> str`
+### `research_web(query: str, recent: bool = False, *, user_message: str) -> str`
 
 Pesquisa a pergunta na web (gera variantes de busca — sempre incluindo a
 pergunta em palavras-chave, com os nomes intactos —, roda em paralelo, faz
@@ -395,6 +395,17 @@ Use `recent=True` só quando a resposta depende do dia de hoje (clima,
 cotação, placar, notícia). Para fatos estáveis (história, biografia,
 conceitos), deixe `recent=False` — filtrar por data descarta as melhores
 fontes.
+
+`user_message` (obrigatório) é a última mensagem do usuário, copiada
+literalmente. O agente que chama costuma traduzir ou trocar o nome que o
+usuário escreveu antes mesmo da primeira pesquisa ("Pai Putrefato" vira
+"Rotting Bride"). Quando a `query` perdeu um nome que está na mensagem, a
+pesquisa também busca pelos nomes da mensagem e usa o texto original na
+triagem e no resumo. Se a mensagem só repete a `query`, nada muda. Medido
+em 11/09/2026 com o agente do Open WebUI (qwen3.8:27B): resposta certa em
+10 de 10 conversas, contra 6 de 10 sem o campo, com menos pesquisas por
+conversa. Opcional, o agente só preenchia o campo em 9 de 20 chamadas; por
+isso ele é obrigatório.
 
 A mesma pergunta reescrita logo em seguida (mesmo conjunto de palavras de
 conteúdo, em qualquer ordem) devolve o resultado anterior em vez de buscar
@@ -462,6 +473,8 @@ A lista completa, com o default de cada uma:
 | `MODEL_CONTEXT_TOKENS` | `65536` | Janela de contexto do modelo, de onde sai o orçamento do dossiê. Com llama.cpp/llama-swap o servidor lê o `--ctx-size` real do modelo carregado em `GET /models` a cada pesquisa, e esse valor ganha; esta variável é o fallback para providers que não expõem isso. Nesses, **tem que bater com a janela real**: declarar mais faz o provider recusar a chamada com HTTP 400 e a pesquisa inteira se perde, depois de já ter pago busca e scraping |
 | `MODEL_RESERVE_TOKENS` | `4096` | Quanto da janela fica reservado para o que não é dossiê: instruções, pergunta e a resposta que o modelo ainda vai gerar. O orçamento do dossiê é `MODEL_CONTEXT_TOKENS - MODEL_RESERVE_TOKENS`                                                                                                                                                                               |
 | `EXTRA_BODY` | *(vazio)* | JSON cru mesclado no payload do `/chat/completions`, para parâmetro que só o seu provider entende. Ex. desligar reasoning no Qwen3: `EXTRA_BODY={"chat_template_kwargs": {"enable_thinking": false}}`. JSON inválido derruba o servidor no boot, de propósito                                                                                                                |
+| `USE_REASONING` | `false` | `true` liga raciocínio curto só nas chamadas que decidem a qualidade: triagem dos resultados, resumo e `analyze_urls`. As outras (variantes de busca, seletor da ponte) seguem só com o `EXTRA_BODY`. Medido com qwen3.8:27B, 10 perguntas × 2 rodadas, notas cegas: +5 pontos e ~+30 s por pesquisa |
+| `REASONING_BODY` | *(vazio)* | JSON que liga o raciocínio no seu modelo, mesclado por cima do `EXTRA_BODY` quando `USE_REASONING=true`. Vazio = formato do Qwen3.x no llama.cpp: `{"chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "low"}}` |
 | `EXTRA_SYSTEM_PROMPT` | *(vazio)* | Texto apenso ao fim do system prompt em toda chamada. Existe porque nem todo modelo desliga reasoning por parâmetro de API — em alguns só obedece por instrução. Ex. `EXTRA_SYSTEM_PROMPT=Reasoning strength: low`. Vale a pena: num modelo que pensa por padrão, gerar 3 linhas de busca custou 2767 tokens / 39s sem, contra 271 / 3s com                                   |
 
 ### Busca (Google CSE via Tor)
