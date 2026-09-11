@@ -980,11 +980,16 @@ def _pick_bridge_terms(missing: list[str], holders: list[dict], candidates: list
 
 
 def _bridge(
-    query: str, recent: bool, pool: list[dict], pages_read: list[tuple[dict, str, str]]
+    query: str, recent: bool, pool: list[dict], pages_read: list[tuple[dict, str, str]],
+    names: list[str] | None = None,
 ) -> tuple[list[tuple[dict, str, str]], list[dict]]:
     """Quando uma frase-nome da pergunta não aparece em nada lido: (páginas
-    extras, resultados do pool que mostram a ligação entre os dois nomes)."""
-    phrases = _name_phrases(query)
+    extras, resultados do pool que mostram a ligação entre os dois nomes).
+
+    names: as frases-nome a procurar, quando quem chama sabe melhor que o
+    texto da pergunta quais são (_carried_from_user). None = as de query.
+    """
+    phrases = names if names is not None else _name_phrases(query)
     if not phrases or not pages_read:
         return [], []
     read_text = _fold("\n".join(page for _, _, page in pages_read))
@@ -1057,20 +1062,21 @@ def _bridge(
 
 
 def _select_and_read(
-    query: str, results: list[dict], recent: bool
+    query: str, results: list[dict], recent: bool, names: list[str] | None = None
 ) -> tuple[list[tuple[dict, str, str]], list[dict]]:
     """Triagem + leitura. Devolve (páginas lidas, escolhidos que não abriram).
 
     Só os escolhidos são lidos: o que a triagem deixou de fora foi julgado de
     outro assunto, e lê-lo só dilui o dossiê e alonga o prefill. A ordem do
-    merge volta inteira apenas quando nenhum escolhido abre.
+    merge volta inteira apenas quando nenhum escolhido abre. names vai para a
+    ponte (_bridge).
     """
     if not results:
         return [], []
     picks = _rerank(query, results, config.RESEARCH_PAGE_BUDGET + _RERANK_SLACK)
     if picks is None:
         pages_read = _read_pages(_cap_per_domain(results), index_first_class=recent)
-        bridged, evidence = _bridge(query, recent, results, pages_read)
+        bridged, evidence = _bridge(query, recent, results, pages_read, names)
         return bridged + _snippet_sources(evidence) + pages_read, []
     # O teto de domínio vale na ordem da triagem: entre páginas do mesmo site
     # ficam as julgadas mais úteis, não as que o merge viu primeiro.
@@ -1088,7 +1094,7 @@ def _select_and_read(
     # resumo negou a pergunta mesmo com elas lidas (medido em 10/09/2026).
     # Os trechos de ligação vêm logo depois, antes das páginas: são eles que
     # dizem ao resumo que o nome da pergunta e o das páginas são a mesma coisa.
-    bridged, evidence = _bridge(query, recent, results, pages_read)
+    bridged, evidence = _bridge(query, recent, results, pages_read, names)
     shown = {r.get("url", "").strip() for r in evidence}
     unread = [r for r in unread if r.get("url", "").strip() not in shown]
     return bridged + _snippet_sources(evidence) + pages_read, unread[:_SNIPPET_SOURCES_MAX]
@@ -1338,6 +1344,14 @@ def research_web(query: str, recent: bool = False, *, user_message: str) -> str:
     # parêntese vai em minúscula para não virar frase-nome.
     prior, carried = _carried_from_user(query, user_message)
     label = "mensagem do usuário"
+    # A ponte procura só os nomes que o usuário escreveu. Nome que está na
+    # query e não na mensagem é palpite do agente — mesma regra do palpite
+    # entre parênteses. Medido em 11/09/2026 (40 conversas simuladas): com os
+    # nomes do texto inteiro, a ponte caçou "Rotting Bride", "The Rotfather"
+    # e "Rotten Brain", escolheu "Bhaal", "Warhammer", "Mizora" como ligação
+    # e leu essas páginas na frente; e a 1ª palavra da mensagem entre aspas
+    # ("Como") virava frase-nome.
+    names = _name_phrases(_PARENTHETICAL_RE.sub(" ", prior)) if prior else None
     if not prior:
         prior, carried = _carried_from_chain(query, chain_questions.get())
         label = "pergunta anterior nesta conversa"
@@ -1363,7 +1377,7 @@ def research_web(query: str, recent: bool = False, *, user_message: str) -> str:
         _remember_result(query, outcome)
         return outcome
 
-    pages_read, unread = _select_and_read(asked, results, recent)
+    pages_read, unread = _select_and_read(asked, results, recent, names=names)
     if not pages_read:
         logger.error("research_web: todas as %d páginas candidatas falharam para query=%r", len(results), query)
         outcome = _search_health_note(results) + "Nenhuma das páginas encontradas pôde ser lida."

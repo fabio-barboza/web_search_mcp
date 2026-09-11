@@ -123,8 +123,9 @@ class TestCarriedFromChain:
             seen["carried"] = carried
             return [{"url": "https://a.example"}]
 
-        def select(asked, results, recent):
+        def select(asked, results, recent, names=None):
             seen["asked"] = asked
+            seen["names"] = names
             return [({"title": "a"}, "https://a.example", "t")], []
 
         def summarize(asked, dossier, recent):
@@ -141,6 +142,7 @@ class TestCarriedFromChain:
             research.chain_questions.reset(token)
         assert seen["carried"] == ("Baldur's Gate Pai Putrefato Ato",)
         assert first in seen["asked"] and first in seen["summary_q"]
+        assert seen["names"] is None  # a ponte segue com os nomes do texto
         assert "Pai Putrefato" in research._name_phrases(seen["asked"])
 
 
@@ -184,8 +186,9 @@ class TestCarriedFromUser:
             seen["carried"] = carried
             return [{"url": "https://a.example"}]
 
-        def select(asked, results, recent):
+        def select(asked, results, recent, names=None):
             seen["asked"] = asked
+            seen["names"] = names
             return [({"title": "a"}, "https://a.example", "t")], []
 
         def summarize(asked, dossier, recent):
@@ -202,6 +205,9 @@ class TestCarriedFromUser:
         assert seen["carried"] == ("Pai Putrefato BG3",)
         assert self.MESSAGE in seen["asked"] and self.MESSAGE in seen["summary_q"]
         assert "mensagem do usuário" in seen["asked"]
+        # A ponte procura só o que o usuário escreveu: nem o nome inventado
+        # pelo agente ("Rotting Bride") nem a 1ª palavra da mensagem ("Como").
+        assert seen["names"] == ["Pai Putrefato", "BG3"]
         # A ponte tira os nomes daqui: o do usuário tem que estar entre eles.
         assert "Pai Putrefato" in research._name_phrases(seen["asked"])
 
@@ -356,6 +362,28 @@ class TestBridge:
         read = [({"title": "x"}, "https://x.example", "cotação")]
         with patch.object(research, "_search_one_safe") as search:
             assert research._bridge("qual a cotação do dólar hoje", True, self.POOL, read) == ([], [])
+        search.assert_not_called()
+
+    # Query com o nome inventado pelo agente + mensagem do usuário, como o
+    # research_web monta quando _carried_from_user dispara.
+    ASKED = ("Baldur's Gate 3 How to start the Rotting Bride quest in Act 3\n"
+             '(mensagem do usuário: "Como incia a chain do Pai Putrefato nop ato 3 em BG3?")')
+    USER_NAMES = ["Pai Putrefato", "BG3"]
+
+    def test_given_names_leave_the_agents_guess_out(self):
+        """Medido em 11/09/2026: com os nomes do texto inteiro, a ponte caçou
+        "Rotting Bride" junto e escolheu "Bhaal" como ligação."""
+        read = [({"title": "x"}, "https://x.example", "BG3 Act 3 walkthrough")]
+        with patch.object(research, "_search_one_safe", return_value=[]) as search, \
+             patch.object(research, "_pick_bridge_terms", side_effect=lambda m, h, c: c[:1]) as pick:
+            research._bridge(self.ASKED, False, self.POOL, read, names=self.USER_NAMES)
+        assert pick.call_args.args[0] == ["Pai Putrefato"]
+        search.assert_called_once_with(("Trumbo BG3", False))
+
+    def test_given_names_all_read_means_no_bridge_for_the_guess(self):
+        read = [({"title": "x"}, "https://x.example", "No BG3, o Pai Putrefato fica na mansão")]
+        with patch.object(research, "_search_one_safe") as search:
+            assert research._bridge(self.ASKED, False, self.POOL, read, names=self.USER_NAMES) == ([], [])
         search.assert_not_called()
 
     def test_llm_picks_among_pool_candidates_only(self):

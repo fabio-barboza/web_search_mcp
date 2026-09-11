@@ -269,7 +269,15 @@ the message — no shared name required, the message is this turn's by
 definition — and does what the chain carry does: the message's names
 query joins the searches and the message goes to triage, bridge and summary
 as context (chain carry is the fallback). A message that just repeats the
-query changes nothing. Cut at `_USER_MESSAGE_MAX_CHARS` (a size guard for
+query changes nothing. The bridge then hunts only the message's own name
+phrases (`names` through `_select_and_read` → `_bridge`): a name that is in
+the query and not in the message is the agent's guess, the same rule as the
+parenthetical. Measured before that rule, over 40 simulated conversations:
+the bridge hunted "Rotting Bride"/"The Rotfather" too, picked "Bhaal",
+"Warhammer", "Mizora" as links and read those pages first, and the quoted
+message's first word ("Como") counted as a name. After it (10 vs 10):
+clean answer 9/10 (was 7), hedged 1 (was 3), wrong 0, 1.2 searches and
+114 s per conversation (were 1.7 and 138 s). Cut at `_USER_MESSAGE_MAX_CHARS` (a size guard for
 pasted text, not measured). Measured: optional, the agent filled it 9/20;
 required, 20/20 verbatim. End to end (simulated Open WebUI agent, 10
 conversations per arm, alternating): right answer 10/10 vs 6/10, 1.7 vs
