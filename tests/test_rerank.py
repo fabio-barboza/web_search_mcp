@@ -80,6 +80,23 @@ class TestSelectAndRead:
         assert pages == fallback
 
 
+class TestMergeDepth:
+    def test_uses_every_position_the_search_returned(self):
+        """Posições além de max_results (limite antigo, do SearXNG) entram."""
+        per_query = [[{"url": f"https://s{i}.com/p"} for i in range(20)]]
+        with patch.object(research._search, "max_results", 10), \
+             patch.object(config, "RESEARCH_POOL_SIZE", 60), \
+             patch.object(config, "RESEARCH_MAX_PER_DOMAIN", 0):
+            merged = research._merge_results(per_query)
+        assert len(merged) == 20
+
+    def test_pool_still_caps(self):
+        per_query = [[{"url": f"https://a{i}.com"} for i in range(20)],
+                     [{"url": f"https://b{i}.com"} for i in range(20)]]
+        with patch.object(config, "RESEARCH_POOL_SIZE", 25):
+            assert len(research._merge_results(per_query)) == 25
+
+
 class TestDomainCapAfterTriage:
     def test_collect_links_does_not_cap_domains(self):
         """O merge entrega todas as páginas do mesmo site; quem corta é a

@@ -150,7 +150,10 @@ Pipeline in `tools/research.py::research_web`:
    (`_generate_queries`), runs the original query + variants in parallel
    against the search source (`_search`: Google CSE over Tor with SearXNG
    fallback, see "Search source" below), merges results ranked by
-   cross-query agreement first, then result score (`_merge_results`).
+   cross-query agreement first, then result score (`_merge_results`). The
+   merge walks every position each search returned (20 on Google CSE), not
+   `_search.max_results` (SearXNG's 10): positions 11-20 held the decisive
+   page in 3 of 10 measured questions.
    Variants must keep the question's names/terms verbatim — a translated
    or guessed name searches for something else (observed: "Pai Putrefato"
    became "Rotfather", a name that does not exist). The prompt alone doesn't

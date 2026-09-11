@@ -390,7 +390,15 @@ def _merge_results(per_query: list[list[dict]], domain_cap: int | None = None) -
     merged: list[dict] = []
     seen: set[str] = set()
     per_domain: dict[str, int] = {}
-    for i in range(_search.max_results):
+    # Percorre tudo o que cada busca devolveu. A profundidade era
+    # _search.max_results (SEARXNG_MAX_RESULTS=10) e jogava fora as posições
+    # 11-20 que o Google CSE já traz de graça. Medido em 10/09/2026, 10
+    # perguntas sem relação entre si, mesmos resultados de busca nos dois
+    # lados: profundidade 20 + pool 60 contra 10 + 40 subiu a nota média de
+    # 86,1 para 89,3 (4 vitórias, 0 derrotas), +0,7 s por pesquisa; em 3 das
+    # vitórias a página decisiva estava entre a 11ª e a 20ª posição.
+    depth = max((len(results) for results in ranked), default=0)
+    for i in range(depth):
         for results in ranked:
             if i >= len(results):
                 continue
