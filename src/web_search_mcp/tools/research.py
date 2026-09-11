@@ -34,7 +34,16 @@ _QUERIES_INSTRUCTION = (
     "com onde ela apareceria (github, linkedin, currículo, empresa). "
     "Se o assunto puder ter cobertura internacional, escreva UMA das buscas "
     "em inglês — quando existe material em inglês, costuma ser o mais "
-    "completo."
+    "completo. "
+    "Nomes próprios, apelidos, títulos, siglas, comandos e qualquer termo "
+    "específico da pergunta entram em TODAS as buscas exatamente como "
+    "estão escritos, inclusive na busca em inglês, onde só as palavras "
+    "comuns mudam de língua. Nunca troque um nome por tradução, sinônimo, "
+    "número ou identificação que você supõe, nem acrescente o que acha "
+    "que ele significa: se o palpite estiver errado, a busca inteira "
+    "procura outra coisa. Se a pergunta der mais de um nome para a mesma "
+    "coisa (\"X / Y\", \"X (Y)\", \"X ou Y\"), faça uma busca para cada "
+    "nome: um deles pode estar errado, e só a busca pelo outro acha."
 )
 
 _BASE_INSTRUCTION = (
@@ -59,7 +68,15 @@ _BASE_INSTRUCTION = (
     "que o dado é daquela data em vez de apresentá-lo como atual. "
     "Ignore páginas irrelevantes ou que "
     "falharam. Nunca invente nada: se o material não responder, diga "
-    "exatamente o que faltou. Não copie o conteúdo bruto das páginas. Se a "
+    "exatamente o que faltou. A pergunta pode trazer premissa errada — "
+    "um nome trocado, uma equivalência (\"X, que é Y\"): só afirme "
+    "identidade ou equivalência que o material mostrar, e quando nada no "
+    "material ligar o nome da pergunta ao que as fontes descrevem, diga "
+    "isso em vez de responder sobre a coisa mais parecida. Quando o "
+    "material responde o núcleo da pergunta mas não repete um detalhe "
+    "dela (uma parte, uma data, uma versão), responda o núcleo primeiro e "
+    "diga numa frase que as fontes não confirmam aquele detalhe — nunca "
+    "troque o detalhe por outro valor que as fontes também não dão. Não copie o conteúdo bruto das páginas. Se a "
     "pergunta for ampla, priorize COBERTURA sobre profundidade: mais itens "
     "curtos, de uma ou duas linhas, em vez de poucos temas aprofundados. "
     "Fontes em outros idiomas valem tanto quanto as em "
@@ -87,6 +104,41 @@ def _format_offset(dt: datetime) -> str:
     return f"{sign}{hours:02d}" + (f":{minutes:02d}" if minutes else "")
 
 
+_KEYWORD_TOKEN_RE = re.compile(r"[\w'’.+#/-]+")
+
+
+def _keyword_query(question: str) -> str:
+    """A pergunta sem palavras de função, com nomes, acentos e caixa intactos.
+
+    Motor de busca rankeia por termo: a pergunta inteira em linguagem
+    natural casa página por palavra de função e palavra solta. Medido em
+    10/09/2026 no Google CSE: "Como inicia a chain do Pai Putrefato no ato 3
+    de BG3?" trouxe 1 resultado do assunto e 9 PDFs acadêmicos; a mesma
+    pergunta em palavras-chave trouxe ~10 do assunto. "" quando não sobra
+    nada que a distinga da pergunta (pergunta já curta).
+    """
+    kept = []
+    for i, token in enumerate(_KEYWORD_TOKEN_RE.findall(question)):
+        # Só no fim: "BG3." perde o ponto, ".NET" continua ".NET".
+        token = token.rstrip(".'’/-")
+        if not token:
+            continue
+        # Maiúscula fora do início da frase é nome, mesmo quando a palavra
+        # também é de função: "Lei do Bem" sem o "Bem" busca outra lei.
+        is_name = i > 0 and token[0].isupper()
+        if is_name or _fold(token) not in _STOPWORDS:
+            kept.append(token)
+    keywords = " ".join(kept)
+    if len(kept) < 2 or _fold(keywords) == _fold(" ".join(_KEYWORD_TOKEN_RE.findall(question))):
+        return ""
+    return keywords
+
+
+def _fold(text: str) -> str:
+    folded = unicodedata.normalize("NFKD", text.lower())
+    return "".join(c for c in folded if not unicodedata.combining(c))
+
+
 def _generate_queries(question: str) -> list[str]:
     """Gera variantes de busca. A pergunta original sempre entra primeiro.
 
@@ -109,7 +161,14 @@ def _generate_queries(question: str) -> list[str]:
         logger.error("_generate_queries: LLM falhou, seguindo só com a pergunta original: %s", e)
         variants = []
 
+    # A forma em palavras-chave entra sempre, montada em código: não depende
+    # de o LLM obedecer a regra de manter os nomes (medido em 10/09/2026, com
+    # a regra no prompt, 2 de 3 variantes ainda trocavam o nome da pergunta
+    # por uma tradução inventada e voltavam com 0 resultados).
     queries = [question]
+    keywords = _keyword_query(question)
+    if keywords:
+        variants = [keywords, *variants]
     for v in variants:
         if v.lower() not in {q.lower() for q in queries}:
             queries.append(v)
@@ -220,7 +279,28 @@ def _collect_links(query: str, recent: bool) -> list[dict]:
         per_query = []
     per_query.insert(0, original_results)
 
-    return _merge_results(per_query)
+    # Sem teto de domínio aqui: ele é aplicado depois da triagem, em
+    # _select_and_read. No merge ele cortava sem julgar — medido em
+    # 10/09/2026, as 2 vagas de um wiki foram para a página de um personagem
+    # e para a homepage do wiki, e a página que respondia (outra do mesmo
+    # site) nunca chegou à triagem.
+    return _merge_results(per_query, domain_cap=0)
+
+
+def _cap_per_domain(candidates: list[dict]) -> list[dict]:
+    """Teto de RESEARCH_MAX_PER_DOMAIN por site, mantendo a ordem recebida."""
+    cap = config.RESEARCH_MAX_PER_DOMAIN
+    if not cap:
+        return candidates
+    out: list[dict] = []
+    per_domain: dict[str, int] = {}
+    for r in candidates:
+        domain = urlsplit(r.get("url", "")).netloc.lower()
+        if per_domain.get(domain, 0) >= cap:
+            continue
+        per_domain[domain] = per_domain.get(domain, 0) + 1
+        out.append(r)
+    return out
 
 
 def _search_health_note(results: list[dict]) -> str:
@@ -255,7 +335,7 @@ def _search_health_note(results: list[dict]) -> str:
     )
 
 
-def _merge_results(per_query: list[list[dict]]) -> list[dict]:
+def _merge_results(per_query: list[list[dict]], domain_cap: int | None = None) -> list[dict]:
     """Mescla os resultados das várias buscas, melhores primeiro.
 
     Round-robin (1º de cada busca, depois o 2º de cada) reparte o orçamento
@@ -306,6 +386,7 @@ def _merge_results(per_query: list[list[dict]]) -> list[dict]:
     # Teto por domínio: sem ele, uma busca cujo top-10 é todo do mesmo site
     # enche a reserva com um veículo só e o dossiê perde variedade (medido:
     # metade das fontes de um resultado saiu da mesma redação). 0 = sem teto.
+    cap = config.RESEARCH_MAX_PER_DOMAIN if domain_cap is None else domain_cap
     merged: list[dict] = []
     seen: set[str] = set()
     per_domain: dict[str, int] = {}
@@ -318,10 +399,7 @@ def _merge_results(per_query: list[list[dict]]) -> list[dict]:
             if not url or key in seen:
                 continue
             domain = urlsplit(url).netloc.lower()
-            if (
-                config.RESEARCH_MAX_PER_DOMAIN
-                and per_domain.get(domain, 0) >= config.RESEARCH_MAX_PER_DOMAIN
-            ):
+            if cap and per_domain.get(domain, 0) >= cap:
                 continue
             merged.append(results[i])
             seen.add(key)
@@ -527,6 +605,8 @@ def _render_dossier(pages_read: list[tuple[dict, str, str]]) -> str:
         f"URL: {url}\n"
         f"Publicado em: {r.get('_date') or 'data não informada'}\n"
         + ("Tipo: capa/índice — lista de manchetes, não matéria apurada\n" if r.get("_index") else "")
+        + ("Tipo: resultado de busca não lido — vale só o que o título e o trecho dizem\n"
+           if r.get("_snippet_only") else "")
         + f"Resumo da busca: {r.get('content', '').strip()}\n"
         f"Conteúdo da página:\n{page}"
         for i, (r, url, page) in enumerate(pages_read, 1)
@@ -546,12 +626,144 @@ def _render_dossier(pages_read: list[tuple[dict, str, str]]) -> str:
     return dossier
 
 
+# Triagem dos candidatos pelo título e trecho, antes de baixar qualquer um.
+#
+# O merge ordena por concordância e score, e o round-robin dá a mesma vaga a
+# cada busca — inclusive à busca ruim. Medido em 10/09/2026: a busca pela
+# pergunta inteira em linguagem natural trouxe 1 resultado do assunto e 9 PDFs
+# acadêmicos que só casavam palavra solta ("pai", "ato", "inicia"), e a
+# variante em palavras-chave trouxe 10 do assunto; no merge, os PDFs pegaram
+# metade das vagas, entraram com 25k caracteres cada (a maior parte do
+# prefill de 54k tokens, 53 s só para o modelo ler) e a página que respondia
+# ficou fora do top 12. O mesmo em pergunta sem relação nenhuma: "doença
+# cobreiro" tinha HIV e alergia (clevelandclinic, acaai) no top 6, vindos de
+# uma variante que traduziu o nome errado.
+#
+# Uma chamada curta de LLM julgando o assunto provável de cada resultado
+# resolve os três, porque não depende de palavra em comum — medido no mesmo
+# dia em 3 perguntas sem relação entre si (jogo, lei, doença): 1,4-2,4 s,
+# 3-7k caracteres de prompt, e as escolhas foram só páginas do assunto
+# (bg3.wiki; gov.br/planalto/wikipedia; dasa/tuasaude/MSD/Ministério da
+# Saúde), sem nenhum dos PDFs e páginas de outra doença que o merge punha no
+# topo. Um corte por palavra da pergunta no título já foi tentado e errava
+# para o outro lado (ver _merge_results): página certa com título em outras
+# palavras.
+_RERANK_INSTRUCTION = (
+    "Você escolhe quais resultados de busca abrir para responder a uma "
+    "pergunta. Recebe a pergunta e uma lista numerada de resultados "
+    "(título, site, trecho). Devolva os números dos resultados com mais "
+    "chance de conter a resposta, do mais para o menos provável, um número "
+    "por linha, no máximo {k}, sem explicar. Julgue pelo assunto provável "
+    "da página, não por palavra solta em comum: página sobre outro assunto "
+    "que só repete uma palavra da pergunta não serve. O que a pergunta chama "
+    "por um nome pode aparecer nos resultados com outro nome ou noutra "
+    "língua; resultados que citam o nome exato ajudam a reconhecer isso. "
+    "Cada página escolhida será baixada e lida como texto: vídeo, post de "
+    "rede social e fórum com login quase nunca rendem o texto da resposta — "
+    "prefira páginas com o conteúdo escrito (artigo, wiki, documentação, "
+    "guia)."
+)
+
+# Vagas extras além do orçamento de páginas: parte dos escolhidos não abre
+# (vídeo, muro de login) e a vaga passa para o próximo escolhido. Medido em
+# 10/09/2026: com folga 4, 3 dos 4 escolhidos de uma pesquisa eram vídeo e o
+# dossiê fechou com 1 página — o resumo negou o que a pergunta pedia.
+_RERANK_SLACK = 6
+_RERANK_TITLE_CHARS = 90
+_RERANK_SNIPPET_CHARS = 160
+
+
+def _rerank(query: str, candidates: list[dict], k: int) -> list[dict] | None:
+    """Candidatos escolhidos pelo LLM, em ordem; None quando a triagem falha.
+
+    None (LLM fora, resposta sem número válido) volta para a ordem do merge:
+    sem triagem a pesquisa ainda funciona, só lê pior.
+    """
+    if len(candidates) <= 1:
+        return None
+    lines = [
+        f"[{i}] {(r.get('title') or '').strip()[:_RERANK_TITLE_CHARS]} — "
+        f"{urlsplit(r.get('url', '')).netloc} — "
+        f"{(r.get('content') or '').strip()[:_RERANK_SNIPPET_CHARS]}"
+        for i, r in enumerate(candidates, 1)
+    ]
+    try:
+        content = chat(
+            system=_RERANK_INSTRUCTION.format(k=k),
+            user=f"Pergunta: {query}\n\nResultados:\n" + "\n".join(lines),
+        )
+    except Exception as e:
+        logger.error("_rerank: LLM falhou, seguindo na ordem do merge: %s", e)
+        return None
+    picks: list[dict] = []
+    seen: set[int] = set()
+    for token in re.findall(r"\d+", content):
+        n = int(token)
+        if 1 <= n <= len(candidates) and n not in seen:
+            seen.add(n)
+            picks.append(candidates[n - 1])
+        if len(picks) >= k:
+            break
+    if not picks:
+        logger.error("_rerank: resposta sem número válido (%r), seguindo na ordem do merge", content[:200])
+        return None
+    logger.info("_rerank: %d de %d candidatos escolhidos", len(picks), len(candidates))
+    return picks
+
+
+# Trechos de busca que entram no dossiê sem a página: o escolhido pela
+# triagem que não abriu (vídeo, muro de login) às vezes é justamente o que
+# liga o nome da pergunta ao nome que as páginas lidas usam — medido em
+# 10/09/2026: o título "Pista de Trumbo, Servo do Pai Putrefato" era a única
+# ligação entre o nome localizado da pergunta e a wiki em inglês, e sumia
+# junto com a página do vídeo. Título e trecho são curtos; o custo é nada.
+_SNIPPET_SOURCES_MAX = 8
+
+
+def _select_and_read(
+    query: str, results: list[dict], recent: bool
+) -> tuple[list[tuple[dict, str, str]], list[dict]]:
+    """Triagem + leitura. Devolve (páginas lidas, escolhidos que não abriram).
+
+    Só os escolhidos são lidos: o que a triagem deixou de fora foi julgado de
+    outro assunto, e lê-lo só dilui o dossiê e alonga o prefill. A ordem do
+    merge volta inteira apenas quando nenhum escolhido abre.
+    """
+    if not results:
+        return [], []
+    picks = _rerank(query, results, config.RESEARCH_PAGE_BUDGET + _RERANK_SLACK)
+    if picks is None:
+        return _read_pages(_cap_per_domain(results), index_first_class=recent), []
+    # O teto de domínio vale na ordem da triagem: entre páginas do mesmo site
+    # ficam as julgadas mais úteis, não as que o merge viu primeiro.
+    picks = _cap_per_domain(picks)
+    pages_read = _read_pages(picks, index_first_class=recent)
+    if not pages_read:
+        logger.info("_select_and_read: nenhum escolhido abriu; lendo o resto na ordem do merge")
+        picked = {id(r) for r in picks}
+        rest = _cap_per_domain([r for r in results if id(r) not in picked])
+        pages_read = _read_pages(rest, index_first_class=recent)
+    read = {url for _, url, _ in pages_read}
+    unread = [r for r in picks if r.get("url", "").strip() not in read and (r.get("title") or r.get("content"))]
+    return pages_read, unread[:_SNIPPET_SOURCES_MAX]
+
+
+def _snippet_sources(unread: list[dict]) -> list[tuple[dict, str, str]]:
+    """Escolhidos não lidos no formato de página do dossiê, marcados como trecho."""
+    out = []
+    for r in unread:
+        r["_snippet_only"] = True
+        out.append((r, r["url"].strip(), "(página não lida: só o título e o trecho do buscador acima)"))
+    return out
+
+
 def _build_dossier(query: str, recent: bool) -> tuple[str, list[tuple[dict, str, str]]]:
     """Busca, lê e monta o dossiê. Separado de _summarize para o eval
     conseguir o dossiê sem repesquisar."""
     results = _collect_links(query, recent)
-    pages_read = _read_pages(results, index_first_class=recent) if results else []
-    return _render_dossier(pages_read), pages_read
+    pages_read, unread = _select_and_read(query, results, recent)
+    sources = pages_read + _snippet_sources(unread) if pages_read else []
+    return _render_dossier(sources), sources
 
 
 def _summarize(query: str, dossier: str, recent: bool) -> str:
@@ -680,11 +892,20 @@ def research_web(query: str, recent: bool = False) -> str:
     NOVA do usuário = chamada nova, mesmo que seja sobre o mesmo assunto de
     antes: cada pergunta diferente merece sua própria pesquisa.
 
+    Se o resumo disser que o material não responde, NÃO pesquise de novo
+    trocando o nome por palpites seus: diga ao usuário o que não foi
+    encontrado e peça o nome exato ou mais contexto.
+
     Args:
-        query: A pergunta completa em linguagem natural, do jeito que o
-            usuário faria. Não reduza a palavras-chave nem parta em pedaços:
-            a reformulação em termos de busca é feita aqui dentro, e uma
-            pergunta inteira dá um resultado melhor que um fragmento.
+        query: A pergunta completa em linguagem natural, com as palavras do
+            usuário. Nomes próprios, apelidos e termos que ele usou vão
+            exatamente como ele escreveu: não traduza, não troque por um
+            equivalente e não acrescente entre parênteses o que você acha
+            que o nome significa — se o palpite estiver errado, a pesquisa
+            inteira procura a coisa errada. Não reduza a palavras-chave nem
+            parta em pedaços: a reformulação em termos de busca é feita aqui
+            dentro, e uma pergunta inteira dá um resultado melhor que um
+            fragmento.
         recent: True apenas quando a resposta depende do dia de hoje
             (clima, cotação, placar, notícia de agora). False para fatos
             estáveis (história, biografia, conceitos, documentação), pois
@@ -715,13 +936,16 @@ def research_web(query: str, recent: bool = False) -> str:
         _remember_result(query, outcome)
         return outcome
 
-    pages_read = _read_pages(results, index_first_class=recent)
+    pages_read, unread = _select_and_read(query, results, recent)
     if not pages_read:
         logger.error("research_web: todas as %d páginas candidatas falharam para query=%r", len(results), query)
         outcome = _search_health_note(results) + "Nenhuma das páginas encontradas pôde ser lida."
         _remember_result(query, outcome)
         return outcome
 
+    # Daqui em diante "pages_read" inclui os trechos de busca: eles são
+    # numerados, citáveis e aparecem na legenda como qualquer fonte, marcados.
+    pages_read = pages_read + _snippet_sources(unread)
     dossier = _render_dossier(pages_read)
     try:
         summary = _summarize(query, dossier, recent)
@@ -741,7 +965,10 @@ def research_web(query: str, recent: bool = False) -> str:
     # e aqui sabemos exatamente qual URL é cada número — atribuição de fonte
     # nunca é redigida pelo modelo. O _read_pages já garantiu que todas
     # abriram, e a numeração segue a ordem dos blocos FONTE [n] do dossiê.
-    sources = "\n".join(f"[{i}] {url}" for i, (_, url, _) in enumerate(pages_read, 1))
+    sources = "\n".join(
+        f"[{i}] {url}" + (" (só título e trecho da busca)" if r.get("_snippet_only") else "")
+        for i, (r, url, _) in enumerate(pages_read, 1)
+    )
 
     # O agente que consome a tool tende a reescrever o resumo e, nisso,
     # apagar as marcações [n] e trocar a atribuição por uma lista genérica
@@ -754,7 +981,10 @@ def research_web(query: str, recent: bool = False) -> str:
         "mantenha esses links INTEIROS e as datas — são a atribuição por "
         "item. Nunca troque um link por um número entre colchetes, por nome "
         "de veículo, nem condense tudo numa lista genérica no rodapé: "
-        "marcador sem link é referência que o usuário não consegue conferir."
+        "marcador sem link é referência que o usuário não consegue conferir. "
+        "Se o resumo disser que o material não responde, não pesquise de "
+        "novo com nomes ou termos supostos por você: diga ao usuário o que "
+        "não foi encontrado e peça o nome exato ou mais contexto."
     )
 
     now = datetime.now().astimezone()

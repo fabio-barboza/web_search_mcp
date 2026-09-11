@@ -36,7 +36,8 @@ sees the raw material.
                      │  1. generates search variants (LLM)         │
   "who was X?"   ──► │  2. searches in parallel (Google via Tor;   │
                      │     SearXNG as fallback)                    │
-                     │  3. opens the N best pages                  │
+                     │  3. triages by title/snippet (LLM), opens   │
+                     │     only the picked pages                   │
                      │  4. builds the dossier ... 15-50k chars     │
                      │  5. summarizes with sources (LLM)           │
        summary  ◄──  │                          ....... ~700 tokens│
@@ -215,7 +216,7 @@ and starts anyway — `read_url` works without it, `research_web` and
 ### From GitHub (no clone needed)
 
 ```bash
-uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0 web-search-mcp
+uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.0 web-search-mcp
 ```
 
 Registering in Claude Code:
@@ -224,18 +225,18 @@ Registering in Claude Code:
 claude mcp add web-search \
   -e SEARXNG_URL=http://localhost:8886 \
   -e MODEL_BASE_URL=http://localhost:8200/v1 \
-  -- uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0 web-search-mcp
+  -- uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.0 web-search-mcp
 ```
 
 Installed this way, `.env` is not read: the whole configuration comes in
 through `-e` — see [Configuring the installed server](#configuring-the-installed-server).
-`@v0.1.0` pins that release. Swap it for `@main` to always track the tip of
+`@v0.2.0` pins that release. Swap it for `@main` to always track the tip of
 the branch, or for any other tag or commit.
 
 To keep the command fixed on your PATH instead of resolving it on every run:
 
 ```bash
-uv tool install git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0
+uv tool install git+https://github.com/fabio-barboza/web_search_mcp@v0.2.0
 ```
 
 ### From a clone (development)
@@ -297,7 +298,7 @@ Or installed, passing the configuration through the environment:
 ```bash
 SEARXNG_URL=http://localhost:8886 \
 MODEL_BASE_URL=http://localhost:8200/v1 \
-uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0 web-search-mcp --http
+uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.0 web-search-mcp --http
 ```
 
 It listens on `http://{MCP_HOST}:{MCP_PORT}/mcp` (default `127.0.0.1:8765`).
@@ -344,7 +345,7 @@ Environment=TOR_CHANNELS=127.0.0.1:9060:9061,127.0.0.1:9070:9071,127.0.0.1:9080:
 Environment=SEARXNG_URL=http://localhost:8886
 # TOR_CONTROL_PASSWORD lives outside the unit, in a file only you can read (chmod 600)
 EnvironmentFile=%h/.config/web-search-mcp/secrets.env
-ExecStart=%h/.local/bin/uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0 web-search-mcp --http
+ExecStart=%h/.local/bin/uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.0 web-search-mcp --http
 Restart=on-failure
 
 [Install]
@@ -387,8 +388,10 @@ to the origins you use, instead of leaving `*`.
 
 ### `research_web(query: str, recent: bool = False) -> str`
 
-Researches the question on the web (generates search variants, runs them in
-parallel, reads the most relevant pages) and returns a summary in Brazilian
+Researches the question on the web (generates search variants — always
+including the question as keywords, names intact —, runs them in parallel,
+triages the candidates by title and snippet and reads only the picked ones)
+and returns a summary in Brazilian
 Portuguese, with a date/time stamp. Every fact ends with a **markdown link to
 the page it came from**, built in code from the URL actually read — not asked
 of the model. A `[n]` marker the model invents for a source that doesn't
@@ -404,6 +407,12 @@ any order) returns the previous result instead of searching again: the tool
 already searches several angles internally, and repeating only rereads the
 same pages. Degraded search comes with the notice described in
 [Where the links come from](#where-the-links-come-from-google-via-tor-searxng-as-fallback).
+
+An agent that searches in circles, rewording the question each time (which
+dodges the cache above), is braked per session: `research_web` and
+`analyze_urls` calls that start right after the previous one returned count
+as the same turn; from the 3rd on the result carries a notice to stop and
+ask the user for the exact name, and the 5th doesn't run.
 
 ### `analyze_urls(urls: list[str], request: str = "Resuma o conteúdo.") -> str`
 
@@ -503,7 +512,7 @@ Used when Google failed on every path, or always, with
 | Variable | Default | What it does |
 |---|---|---|
 | `RESEARCH_PAGE_BUDGET` | `5` | How many pages go into a search's dossier, across all searches. The main quality × latency knob |
-| `RESEARCH_POOL_SIZE` | `20` | Pool of candidate links. A dead, blocked or empty link doesn't use up a budget slot: it yields to the next one in the pool |
+| `RESEARCH_POOL_SIZE` | `40` | Pool of candidate links, and what the title/snippet triage sees before any page is opened. A dead, blocked or empty link doesn't use up a budget slot: it yields to the next one in the pool. A narrow pool keeps the right page out of the triage |
 | `RESEARCH_MAX_WAVES` | `4` | Cap on read attempts before giving up. Without it, a bad run of links would sweep the whole pool and blow up latency |
 | `RESEARCH_MAX_PER_DOMAIN` | `2` | Max URLs from the same domain in the candidate pool. Without a cap, a search whose top 10 is all one site fills the dossier with a single outlet. `0` = no limit |
 | `RESEARCH_PAGE_CHARS` | `25000` | Per-page character cap in the `research_web` dossier. It exists for the outlier: a single giant page once produced 412k characters = 103k tokens against a 65k context, and the whole search was lost. Don't squeeze it too much — a dossier that's too small makes the summary worse |
@@ -574,7 +583,7 @@ claude mcp add web-search \
   -e MODEL_BASE_URL=http://localhost:8200/v1 \
   -e MODEL_CONTEXT_TOKENS=65536 \
   -e TZ=America/Sao_Paulo \
-  -- uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0 web-search-mcp
+  -- uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.0 web-search-mcp
 ```
 
 Note that `MODEL` isn't there: left out, the server uses the model already
@@ -588,7 +597,7 @@ The command above writes this to `.mcp.json` (project scope) or to
   "mcpServers": {
     "web-search": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/fabio-barboza/web_search_mcp@v0.1.0", "web-search-mcp"],
+      "args": ["--from", "git+https://github.com/fabio-barboza/web_search_mcp@v0.2.0", "web-search-mcp"],
       "env": {
         "SEARXNG_URL": "http://localhost:8886",
         "MODEL_BASE_URL": "http://localhost:8200/v1"

@@ -1,10 +1,16 @@
 """Servidor MCP autônomo: expõe read_url e research_web via FastMCP."""
 
 import argparse
+import logging
+import time
 from datetime import datetime
 
 import uvicorn
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware as MCPMiddleware
+from fastmcp.server.middleware import MiddlewareContext
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
@@ -20,7 +26,11 @@ mcp = FastMCP(
         "certeza absoluta, passando a pergunta inteira em linguagem natural "
         "e UMA VEZ SÓ: ela já busca vários ângulos por dentro, então repetir "
         "a mesma pergunta reescrita relê as mesmas páginas e dobra o tempo "
-        "de espera sem trazer material novo. "
+        "de espera sem trazer material novo. Passe os nomes e termos do "
+        "usuário exatamente como ele escreveu, sem traduzir, trocar ou "
+        "explicar entre parênteses: um palpite errado seu vira busca pela "
+        "coisa errada. Se a pesquisa não encontrar, diga isso ao usuário e "
+        "peça o nome exato em vez de pesquisar de novo com palpites. "
         "Use analyze_urls quando o usuário fornecer link(s) e pedir resumo, "
         "parecer, opinião ou comparação: a leitura e a análise acontecem lá "
         "dentro e só o resultado volta. "
@@ -42,6 +52,98 @@ mcp.tool(research_web)
 mcp.tool(analyze_urls)
 
 
+# Freio de cadeia: o agente que chama às vezes pesquisa em círculo, trocando
+# a pergunta a cada volta — escapa do cache anti-repetição do research_web,
+# que só pega a MESMA pergunta. Observado em 10/09/2026 no Open WebUI: 5
+# research_web + 3 analyze_urls encadeados, cada um trocando o nome do que
+# o usuário perguntou por um palpite novo, 5,3 min até uma resposta errada.
+#
+# O sinal é estrutural, nunca o assunto: chamadas que começam logo depois
+# que a anterior devolveu, na mesma sessão, são o mesmo turno do agente. Nos
+# logs desse caso o intervalo entre devolver e chamar de novo foi 0-10 s;
+# uma pergunta nova do usuário exige ler a resposta e digitar, bem mais que
+# _CHAIN_GAP_SECONDS. Da _CHAIN_SOFT-ésima chamada em diante o resultado vem
+# com um aviso; a partir da _CHAIN_HARD-ésima a chamada nem roda — devolve
+# na hora a ordem de responder com o que já tem.
+_CHAINED_TOOLS = {"research_web", "analyze_urls"}
+_CHAIN_GAP_SECONDS = 45.0
+_CHAIN_SOFT = 3
+_CHAIN_HARD = 5
+
+
+logger = logging.getLogger(__name__)
+
+
+class _ChainGuard(MCPMiddleware):
+    def __init__(self) -> None:
+        # sessão → (quando a última chamada devolveu, tamanho da cadeia)
+        self._chains: dict[str, tuple[float, int]] = {}
+
+    def _session(self, context: MiddlewareContext) -> str:
+        try:
+            return context.fastmcp_context.session_id
+        except Exception:
+            return "_"
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        if context.message.name not in _CHAINED_TOOLS:
+            return await call_next(context)
+
+        sid = self._session(context)
+        now = time.monotonic()
+        last_end, length = self._chains.get(sid, (0.0, 0))
+        # O instante é gravado já na entrada, não só na saída: chamadas em
+        # paralelo chegam antes de a anterior devolver e também entram na
+        # cadeia.
+        length = length + 1 if now - last_end <= _CHAIN_GAP_SECONDS else 1
+        self._chains[sid] = (now, length)
+        if len(self._chains) > 200:
+            oldest = min(self._chains, key=lambda k: self._chains[k][0])
+            del self._chains[oldest]
+
+        if length >= _CHAIN_HARD:
+            logger.warning("_ChainGuard: sessão %s, chamada %d encadeada de %s barrada",
+                           sid, length, context.message.name)
+            self._chains[sid] = (time.monotonic(), length)
+            return ToolResult(content=[TextContent(type="text", text=_chain_stop_note(length))])
+
+        result = await call_next(context)
+        self._chains[sid] = (time.monotonic(), length)
+        if length >= _CHAIN_SOFT:
+            logger.warning("_ChainGuard: sessão %s, chamada %d encadeada de %s",
+                           sid, length, context.message.name)
+            note = _chain_soft_note(length)
+            result.content = [TextContent(type="text", text=note), *result.content]
+            if isinstance(result.structured_content, dict) and isinstance(
+                result.structured_content.get("result"), str
+            ):
+                result.structured_content["result"] = note + result.structured_content["result"]
+        return result
+
+
+def _chain_soft_note(n: int) -> str:
+    return (
+        f"AVISO: esta é a {n}ª pesquisa seguida nesta mesma resposta. Se as "
+        "anteriores não encontraram o que o usuário pediu, trocar a pergunta "
+        "por outro palpite não vai encontrar: responda agora com o que já "
+        "tem, diga o que não foi encontrado e peça ao usuário o nome exato ou "
+        f"mais contexto. A partir da {_CHAIN_HARD}ª pesquisa seguida, ela "
+        "não será mais executada.\n\n"
+    )
+
+
+def _chain_stop_note(n: int) -> str:
+    return (
+        f"PESQUISA NÃO EXECUTADA: seria a {n}ª seguida nesta mesma resposta. "
+        "Responda ao usuário agora com o que as pesquisas anteriores "
+        "trouxeram, diga claramente o que não foi encontrado e peça o nome "
+        "exato ou mais contexto. Se ele quiser outra pesquisa, ele pede."
+    )
+
+
+mcp.add_middleware(_ChainGuard())
+
+
 @mcp.prompt
 def pesquisador() -> str:
     """Política de pesquisa: sempre pesquisar, nunca inventar, citar a fonte."""
@@ -49,7 +151,8 @@ def pesquisador() -> str:
     return (
         f"Data e hora atual: {now}. "
         "Você é um assistente que responde em português do Brasil. "
-        "SEMPRE chame a ferramenta research_web com a pergunta completa "
+        "SEMPRE chame a ferramenta research_web com a pergunta completa, "
+        "com os nomes e termos exatamente como o usuário escreveu, "
         "antes de responder qualquer coisa que você não saiba com certeza "
         "absoluta, e responda EXCLUSIVAMENTE com base no resumo que ela "
         "devolver, mantendo a atribuição por item que vier nele (marcações "

@@ -143,7 +143,14 @@ RESEARCH_PAGE_BUDGET = int(os.getenv("RESEARCH_PAGE_BUDGET", "5"))
 
 # Reserva de links. Link morto, bloqueado ou sem texto não gasta vaga do
 # orçamento: cede o lugar para o próximo da reserva.
-RESEARCH_POOL_SIZE = int(os.getenv("RESEARCH_POOL_SIZE", "20"))
+#
+# É também o que a triagem (_rerank) enxerga, e por isso 40: a triagem lê só
+# título e trecho (~250 caracteres por candidato), então pool largo custa
+# ~2-3 s de prompt e não entra no dossiê. Medido em 10/09/2026: com 20, o
+# round-robin encheu metade do pool com os PDFs de uma busca ruim e a
+# triagem não tinha nenhuma página do assunto para escolher — as que
+# respondiam estavam em 21º em diante.
+RESEARCH_POOL_SIZE = int(os.getenv("RESEARCH_POOL_SIZE", "40"))
 
 # Teto de tentativas. Sem ele, uma sequência ruim de links varreria a
 # reserva inteira e estouraria a latência.

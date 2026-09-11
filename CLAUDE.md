@@ -151,7 +151,27 @@ Pipeline in `tools/research.py::research_web`:
    against the search source (`_search`: Google CSE over Tor with SearXNG
    fallback, see "Search source" below), merges results ranked by
    cross-query agreement first, then result score (`_merge_results`).
-2. `_read_pages` — downloads/extracts candidates in waves
+   Variants must keep the question's names/terms verbatim — a translated
+   or guessed name searches for something else (observed: "Pai Putrefato"
+   became "Rotfather", a name that does not exist). The prompt alone doesn't
+   hold that on small models, so `_keyword_query` always adds, in code, the
+   question minus function words (`_STOPWORDS`), names/case/accents intact;
+   a mid-sentence capital is kept even if it's a function word ("Lei do
+   Bem"). The natural-language question as a query matched keyword PDFs;
+   its keyword form matched the subject.
+2. `_select_and_read` — `_rerank` triages the pool by title+site+snippet in
+   one short LLM call (~2 s) and only the picks are read; the merge order
+   comes back only if the triage fails or no pick opens. Round-robin alone
+   gave a bad query's junk (keyword-matching PDFs, 25k chars each) the same
+   slots as a good query's hits — most of the summary prefill and the wrong
+   answer. Picks that don't open (video, login wall) enter the dossier as
+   snippet-only sources (`_snippet_sources`): their title is sometimes the
+   only link between the question's name and the name the pages use.
+   `RESEARCH_MAX_PER_DOMAIN` is applied AFTER the triage, in triage order
+   (`_cap_per_domain`), never in the merge: in the merge it cut unjudged —
+   a wiki's 2 slots went to a character page and the wiki's homepage, and
+   the page that answered (same site) never reached the triage.
+   `_read_pages` — downloads/extracts candidates in waves
    (`RESEARCH_MAX_WAVES`) until `RESEARCH_PAGE_BUDGET` usable pages are
    collected or the char budget (`_dossier_char_budget`, derived from
    `MODEL_CONTEXT_TOKENS - MODEL_RESERVE_TOKENS`) runs out. A dead/blocked/
@@ -161,6 +181,13 @@ Pipeline in `tools/research.py::research_web`:
 4. `_summarize` — one more LLM call, cites URLs, dated, in pt-BR.
 5. Final answer appends the source URL list assembled in code (not asked of
    the model) — the model unreliably keeps URLs verbatim in prose.
+
+`server._ChainGuard` (FastMCP middleware) bounds a calling agent that
+searches in circles, rewriting the question each time (which dodges
+`research_web`'s same-question cache): `research_web`/`analyze_urls` calls
+in one MCP session that start within `_CHAIN_GAP_SECONDS` of the previous
+return are one agent turn; from the 3rd on the result carries a stop note,
+the 5th doesn't run. Structural (timing + session), never the subject.
 
 `read_url` is the plain counterpart: single URL, full text, no LLM, no
 budget truncation (`WebScraper(limit=None)`).

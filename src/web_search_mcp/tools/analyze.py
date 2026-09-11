@@ -31,7 +31,10 @@ _INSTRUCTION = (
     "que é avaliação sua. Traduza com fidelidade material em outros idiomas, "
     "mantendo nomes próprios e termos técnicos na forma original quando não "
     "houver tradução consagrada. Nunca invente: se o material não sustentar "
-    "uma resposta, diga o que faltou."
+    "uma resposta, diga o que faltou. O pedido pode trazer premissa errada "
+    "— um nome trocado, uma equivalência (\"X, que é Y\"), um fato "
+    "pressuposto: só repita o que o material confirmar, e diga quando ele "
+    "não confirmar em vez de adotar a premissa."
 )
 
 

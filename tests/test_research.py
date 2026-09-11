@@ -46,6 +46,32 @@ class TestGenerateQueries:
             queries = research._generate_queries("pergunta qualquer")
         assert queries == ["pergunta qualquer"]
 
+    def test_keyword_form_always_second_even_without_llm(self):
+        """Não depende de o LLM manter o nome: vem do código."""
+        with patch("web_search_mcp.tools.research.chat", side_effect=RuntimeError("boom")):
+            queries = research._generate_queries("Como inicia a chain do Pai Putrefato no ato 3 de BG3?")
+        assert queries == [
+            "Como inicia a chain do Pai Putrefato no ato 3 de BG3?",
+            "inicia chain Pai Putrefato ato 3 BG3",
+        ]
+
+
+class TestKeywordQuery:
+    @pytest.mark.parametrize("question,expected", [
+        ("Quem foi a Tia Ciata?", "Tia Ciata"),
+        ("O que diz a Lei do Bem sobre incentivo à inovação?", "diz Lei Bem incentivo inovação"),
+        ("Como usar o git worktree para trabalhar em duas branches ao mesmo tempo?",
+         "usar git worktree trabalhar duas branches tempo"),
+        ("How does OAuth2 PKCE work with a SPA?", "OAuth2 PKCE work SPA"),
+        ("Qual a versão do C++ e do C# no .NET 8?", "versão C++ C# .NET 8"),
+    ])
+    def test_drops_function_words_keeps_names(self, question, expected):
+        assert research._keyword_query(question) == expected
+
+    def test_empty_when_nothing_to_drop(self):
+        assert research._keyword_query("Santos Dumont") == ""
+        assert research._keyword_query("dólar?") == ""
+
 
 class TestSearchOne:
     def test_recent_with_few_results_completes_without_time_range(self):
