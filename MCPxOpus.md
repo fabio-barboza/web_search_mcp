@@ -87,8 +87,8 @@ Quando o MCP terminar, dê nota de 1 a 100 a cada resposta dos dois lados:
 Confira na web os fatos em que as duas respostas divergem antes de dar a
 nota. Seja igualmente rigoroso com as suas respostas.
 
-**Vencedor**: maior nota. Diferença de até 2 pontos é empate técnico — vence
-o mais rápido, marcado "(tempo)".
+**Vencedor**: maior nota, só pela qualidade da resposta. Diferença de até 2
+pontos é empate. O tempo é registrado, mas nunca decide o vencedor.
 
 ## 4. report-versus.md
 
