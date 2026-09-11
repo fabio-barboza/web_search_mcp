@@ -1,7 +1,7 @@
 # MCP x Opus
 
 Execute o comparativo abaixo do começo ao fim, sem pedir confirmação, e
-termine gravando `report-versus.md` na raiz do projeto.
+termine gravando `report-versus-AAAA-MM-DD-HHMM.md` na raiz do projeto.
 
 ## Perguntas
 
@@ -90,9 +90,11 @@ nota. Seja igualmente rigoroso com as suas respostas.
 **Vencedor**: maior nota, só pela qualidade da resposta. Diferença de até 2
 pontos é empate. O tempo é registrado, mas nunca decide o vencedor.
 
-## 4. report-versus.md
+## 4. report-versus-AAAA-MM-DD-HHMM.md
 
-Grave na raiz do projeto (sobrescreve o anterior):
+Grave na raiz do projeto com data e hora do início da execução no nome
+(ex.: `report-versus-2026-09-11-1118.md`). Nunca sobrescreva nem apague um
+relatório anterior: eles são o histórico para comparar versões.
 
 ```markdown
 # MCP x Opus — DD/MM/AAAA HH:MM

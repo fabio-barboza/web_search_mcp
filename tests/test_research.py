@@ -53,7 +53,95 @@ class TestGenerateQueries:
         assert queries == [
             "Como inicia a chain do Pai Putrefato no ato 3 de BG3?",
             "inicia chain Pai Putrefato ato 3 BG3",
+            "Pai Putrefato BG3",
         ]
+
+
+class TestNamesQuery:
+    @pytest.mark.parametrize("question,expected", [
+        ("Baldur's Gate 3 como iniciar a quest do Pai Putrefato (Rotting Father) no Ato 3",
+         "Baldur's Gate Pai Putrefato Ato"),
+        ("Como inicia a chain do Pai Putrefato no ato 3 de BG3?", "Pai Putrefato BG3"),
+        ("O que diz a Lei do Bem sobre incentivo à inovação?", "Lei do Bem"),
+        ("Qual a diferença entre o Pix Automático e o Pix Agendado?", "Pix Automático Pix Agendado"),
+        ("Como funciona o fluxo de autorização OAuth2 com PKCE?", "OAuth2 PKCE"),
+    ])
+    def test_only_the_names(self, question, expected):
+        assert research._names_query(question) == expected
+
+    @pytest.mark.parametrize("question", [
+        "Quais as principais noticias no Brasil e no mundo hoje?",  # nome solto
+        "Qual a cotação atual do dólar em reais?",                  # sem nome
+        "O que é a doença cobreiro e como trata?",
+        "O que é o protocolo MCP (Model Context Protocol)?",        # só aparte
+    ])
+    def test_empty_without_two_name_words(self, question):
+        assert research._names_query(question) == ""
+
+    def test_joins_queries_without_taking_an_llm_slot(self):
+        llm = "v1\nv2\nv3\nv4"
+        with patch("web_search_mcp.tools.research.chat", return_value=llm):
+            queries = research._generate_queries("Qual a diferença entre o Pix Automático e o Pix Agendado?")
+        assert queries[1:3] == ["diferença entre Pix Automático Pix Agendado", "Pix Automático Pix Agendado"]
+        # As mesmas 3 variantes do LLM de antes da busca de nomes existir.
+        assert queries[3:] == ["v1", "v2", "v3"]
+
+    def test_same_as_keywords_is_not_repeated(self):
+        with patch("web_search_mcp.tools.research.chat", return_value="v1"):
+            queries = research._generate_queries("Quem foi a Tia Ciata?")
+        assert queries == ["Quem foi a Tia Ciata?", "Tia Ciata", "v1"]
+
+
+class TestCarriedFromChain:
+    """Pergunta reescrita no mesmo turno x pergunta sobre outra coisa."""
+
+    OPEN_WEBUI = (
+        "Baldur's Gate 3 como iniciar a quest da cadeia do Pai Putrefato (Rotting Father) no Ato 3",
+        "Baldur's Gate 3 Act 3 quest Rotting Father chain how to start",
+    )
+
+    def test_rewrite_that_dropped_the_users_name_carries_it(self):
+        first, second = self.OPEN_WEBUI
+        prior, carried = research._carried_from_chain(second, (first,))
+        assert prior == first
+        assert carried == ("Baldur's Gate Pai Putrefato Ato",)
+
+    @pytest.mark.parametrize("earlier,query", [
+        ("Quem foi a Tia Ciata?", "Quem foi Pixinguinha?"),               # outro assunto
+        ("O que é o Pix Automático?", "Como funciona o OAuth2 com PKCE?"),
+        ("Quem foi Santos Dumont?", "Quem foi Santos Dumont e o 14-bis?"),  # só acrescentou
+        ("Qual a cotação do dólar?", "E do euro hoje?"),                   # sem nome
+    ])
+    def test_other_question_or_nothing_dropped_is_left_alone(self, earlier, query):
+        assert research._carried_from_chain(query, (earlier,)) == ("", ())
+
+    def test_research_web_hands_prior_question_to_triage_and_summary(self, monkeypatch):
+        first, second = self.OPEN_WEBUI
+        seen = {}
+
+        def collect(q, recent, carried=()):
+            seen["carried"] = carried
+            return [{"url": "https://a.example"}]
+
+        def select(asked, results, recent):
+            seen["asked"] = asked
+            return [({"title": "a"}, "https://a.example", "t")], []
+
+        def summarize(asked, dossier, recent):
+            seen["summary_q"] = asked
+            return "ok"
+
+        monkeypatch.setattr(research, "_collect_links", collect)
+        monkeypatch.setattr(research, "_select_and_read", select)
+        monkeypatch.setattr(research, "_summarize", summarize)
+        token = research.chain_questions.set((first,))
+        try:
+            research.research_web(second)
+        finally:
+            research.chain_questions.reset(token)
+        assert seen["carried"] == ("Baldur's Gate Pai Putrefato Ato",)
+        assert first in seen["asked"] and first in seen["summary_q"]
+        assert "Pai Putrefato" in research._name_phrases(seen["asked"])
 
 
 class TestNamePhrases:
@@ -68,6 +156,24 @@ class TestNamePhrases:
     ])
     def test_phrases_come_from_token_shape(self, question, phrases):
         assert research._name_phrases(question) == phrases
+
+    @pytest.mark.parametrize("question,phrases", [
+        # Observado no Open WebUI: o palpite entre parênteses grudava no nome
+        # e a frase resultante não existia em página nenhuma.
+        ("Baldur's Gate 3 como iniciar a quest do Pai Putrefato (Rotting Father) no Ato 3",
+         ["Baldur's Gate", "Pai Putrefato", "Rotting Father", "Ato"]),
+        ("Docker Compose ou Kubernetes (K8s) em produção?", ["Docker Compose", "Kubernetes", "K8s"]),
+        ("Quem foi o Rei do Baião, Luiz Gonzaga?", ["Rei do Baião", "Luiz Gonzaga"]),
+        ("Diferença entre Pix Automático / Pix Agendado", ["Pix Automático", "Pix Agendado"]),
+        ("Santos Dumont inventou o avião?", ["Santos Dumont"]),
+        ("Onde Anitta nasceu?", ["Anitta"]),
+    ])
+    def test_punctuation_splits_names_and_first_word_joins_a_name(self, question, phrases):
+        assert research._name_phrases(question) == phrases
+
+    def test_repeated_name_listed_once(self):
+        asked = 'Quest Rotting Father em Baldur\'s Gate\n(pergunta anterior nesta conversa: "Baldur\'s Gate: Pai Putrefato (Rotting Father)")'
+        assert research._name_phrases(asked) == ["Quest Rotting Father", "Baldur's Gate", "Pai Putrefato", "Rotting Father"]
 
     def test_mentions_matches_whole_phrase_folded(self):
         assert research._mentions("Pix Automático", research._fold("O PIX  automatico chegou"))
@@ -145,32 +251,62 @@ class TestBridge:
         with patch.object(research, "_search_one_safe", return_value=[found]) as search, \
              patch.object(research, "_rerank", return_value=None), \
              patch.object(research, "_read_pages", return_value=[(found, found["url"], "texto")]) as reader:
-            extra = research._bridge(self.QUESTION, False, self.POOL, read)
+            extra, evidence = research._bridge(self.QUESTION, False, self.POOL, read)
         search.assert_called_once_with(("Trumbo BG3", False))
         assert extra == [(found, found["url"], "texto")]
+        # O título que cita os dois nomes vai junto, como prova da ligação.
+        assert [r["title"] for r in evidence] == ["Baldur's Gate 3 : Pista de Trumbo, Servo do Pai Putrefato - YouTube"]
         assert reader.call_args.kwargs["page_budget"] == research._BRIDGE_PAGES
         assert reader.call_args.kwargs["char_budget"] > 0
 
-    def test_bridge_pages_lead_the_dossier(self):
-        page = ({"title": "a"}, "https://a.example", "texto")
+    @pytest.mark.parametrize("question,page,expected", [
+        # "Ato" com maiúscula, mas as páginas escrevem "ato": palavra comum.
+        ("Como inicia a quest do Pai Putrefato no Ato 3 de BG3?",
+         "BG3: no ato 3, a Cidade Baixa", "Trumbo BG3"),
+        # "Gate" também só aparece com maiúscula: nome, fica.
+        ("Pai Putrefato em Baldur's Gate", "Baldur's Gate walkthrough", "Trumbo Baldur's Gate"),
+    ])
+    def test_capitalized_common_word_left_out_of_anchor(self, question, page, expected):
+        read = [({"title": "x"}, "https://x.example", page)]
+        with patch.object(research, "_search_one_safe", return_value=[]) as search:
+            research._bridge(question, False, self.POOL, read)
+        search.assert_called_once_with((expected, False))
+
+    def test_bridge_pages_then_evidence_lead_the_dossier(self):
+        page = ({"title": "a", "url": "https://a.example"}, "https://a.example", "texto")
         extra = ({"title": "b"}, "https://b.example", "ponte")
-        with patch.object(research, "_rerank", return_value=[page[0]]), \
+        proof ={"title": "c", "url": "https://c.example", "content": "nome A e nome B"}
+        with patch.object(research, "_rerank", return_value=[page[0], proof]), \
              patch.object(research, "_read_pages", return_value=[page]), \
-             patch.object(research, "_bridge", return_value=[extra]):
-            pages, _ = research._select_and_read(self.QUESTION, [{"url": "https://a.example"}], False)
-        assert pages == [extra, page]
+             patch.object(research, "_bridge", return_value=([extra], [proof])):
+            pages, unread = research._select_and_read(self.QUESTION, [{"url": "https://a.example"}], False)
+        assert [url for _, url, _ in pages] == ["https://b.example", "https://c.example", "https://a.example"]
+        assert pages[1][0]["_snippet_only"]
+        assert unread == []  # a prova não aparece duas vezes
 
     def test_no_search_when_every_name_was_read(self):
         read = [({"title": "x"}, "https://x.example", "No BG3, o Pai Putrefato fica na mansão")]
         with patch.object(research, "_search_one_safe") as search:
-            assert research._bridge(self.QUESTION, False, self.POOL, read) == []
+            assert research._bridge(self.QUESTION, False, self.POOL, read) == ([], [])
         search.assert_not_called()
 
     def test_no_search_for_question_without_names(self):
         read = [({"title": "x"}, "https://x.example", "cotação")]
         with patch.object(research, "_search_one_safe") as search:
-            assert research._bridge("qual a cotação do dólar hoje", True, self.POOL, read) == []
+            assert research._bridge("qual a cotação do dólar hoje", True, self.POOL, read) == ([], [])
         search.assert_not_called()
+
+    def test_llm_picks_among_pool_candidates_only(self):
+        with patch.object(research, "chat", return_value="2\n7\n99"):
+            assert research._pick_bridge_terms(["X"], [], ["Comments", "Trumbo", "Act"]) == ["Trumbo"]
+
+    def test_llm_zero_means_no_bridge(self):
+        with patch.object(research, "chat", return_value="0"):
+            assert research._pick_bridge_terms(["X"], [], ["Comments", "Act"]) == []
+
+    def test_llm_failure_keeps_statistic_order(self):
+        with patch.object(research, "chat", side_effect=RuntimeError("fora")):
+            assert research._pick_bridge_terms(["X"], [], ["a1", "a2", "a3"]) == ["a1", "a2"]
 
 
 class TestKeywordQuery:
@@ -183,6 +319,17 @@ class TestKeywordQuery:
         ("Qual a versão do C++ e do C# no .NET 8?", "versão C++ C# .NET 8"),
     ])
     def test_drops_function_words_keeps_names(self, question, expected):
+        assert research._keyword_query(question) == expected
+
+    @pytest.mark.parametrize("question,expected", [
+        # Observado no Open WebUI: o palpite do agente entre parênteses ia
+        # junto na busca e nenhuma página tinha os dois nomes.
+        ("Baldur's Gate 3 como iniciar a quest do Pai Putrefato (Rotting Father) no Ato 3",
+         "Baldur's Gate 3 iniciar quest Pai Putrefato Ato 3"),
+        ("O que é o protocolo MCP (Model Context Protocol)?", "protocolo MCP"),
+        ("Quanto rende o CDB (certificado de depósito bancário) hoje?", "rende CDB hoje"),
+    ])
+    def test_parenthetical_aside_left_out(self, question, expected):
         assert research._keyword_query(question) == expected
 
     def test_empty_when_nothing_to_drop(self):

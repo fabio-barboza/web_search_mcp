@@ -120,8 +120,13 @@ def context_tokens() -> int:
     return config.MODEL_CONTEXT_TOKENS
 
 
-def chat(system: str, user: str, temperature: float | None = None) -> str:
-    """Chamada de chat completion numa API compatível com OpenAI."""
+def chat(system: str, user: str, temperature: float | None = None, reasoning: bool = False) -> str:
+    """Chamada de chat completion numa API compatível com OpenAI.
+
+    reasoning=True aplica config.REASONING_BODY por cima do EXTRA_BODY quando
+    USE_REASONING está ligado: pedido só pelas chamadas que decidem a
+    qualidade da resposta (ver config).
+    """
     model = _resolve_model()
     if config.EXTRA_SYSTEM_PROMPT:
         system = f"{system}\n\n{config.EXTRA_SYSTEM_PROMPT}"
@@ -135,6 +140,8 @@ def chat(system: str, user: str, temperature: float | None = None) -> str:
     }
     if config.EXTRA_BODY:
         payload.update(config.EXTRA_BODY)
+    if reasoning and config.USE_REASONING and config.REASONING_BODY:
+        payload.update(config.REASONING_BODY)
     try:
         r = requests.post(
             f"{config.MODEL_BASE_URL}/chat/completions",

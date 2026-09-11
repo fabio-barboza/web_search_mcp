@@ -161,7 +161,17 @@ Pipeline in `tools/research.py::research_web`:
    question minus function words (`_STOPWORDS`), names/case/accents intact;
    a mid-sentence capital is kept even if it's a function word ("Lei do
    Bem"). The natural-language question as a query matched keyword PDFs;
-   its keyword form matched the subject.
+   its keyword form matched the subject. Parentheticals are left out of the
+   keyword form: they are asides, often the calling agent's own guess
+   ("Pai Putrefato (Rotting Father)" searched both names together and no
+   page has both). `_names_query` adds, in code, a search with only the
+   question's name phrases (≥2 name words): the keyword form still ANDs
+   every content word, and on Google "…iniciar quest cadeia Pai Putrefato
+   Ato 3" gave 3 results, 0 with the name, vs 11/20 for the names alone.
+   It doesn't take an LLM variant's slot. `_name_phrases` splits names at
+   punctuation (the parenthesis used to glue "Pai Putrefato Rotting
+   Father" into one phrase no page contains) and takes the first word when
+   it runs straight into a name ("Baldur's Gate").
 2. `_select_and_read` — `_rerank` triages the pool by title+site+snippet in
    one short LLM call (~2 s) and only the picks are read; the merge order
    comes back only if the triage fails or no pick opens. Round-robin alone
@@ -185,8 +195,25 @@ Pipeline in `tools/research.py::research_web`:
    `_NAME_CONNECTORS` like the "do" in "Lei do Bem") appears in no page read,
    `_bridge_terms` picks title-case words that co-occur with it in the
    pool's titles/snippets, sit in ≥2 candidates and ≤10% of the pool (rarest
-   first; the candidate's own site name and ALL-CAPS title words excluded),
-   and runs one short search per term: "term + confirmed names" (one extra
+   first; the candidate's own site name and ALL-CAPS title words excluded).
+   Up to `_BRIDGE_CANDIDATES` of them go to `_pick_bridge_terms`, one short
+   LLM call that reads the snippets carrying the name and answers only with
+   numbers from that list (it can't put a word that isn't in the pool into
+   a search; "0" = none fits; failure = statistic order). Counting alone
+   tied the linking name with site chrome and title-case words ("Trumbo" vs
+   "Comments", "Act", "Encontre") and lost 7 of 10 real pools; the picker
+   chose the linking name in 10/10, plus Luiz Gonzaga for "Rei do Baião",
+   Herpes Zoster for "cobreiro", and nothing when only chrome co-occurred.
+   The pool results citing the question's name together with a picked term
+   enter the dossier as snippet sources right after the bridge pages
+   (`_BRIDGE_EVIDENCE`): without that proof the summary read the right
+   pages, which only use the other name, and denied the question 3/3,
+   because it may only assert an identity the material shows. The anchor
+   (the question's names that pages did confirm) drops a single-word,
+   digit-free phrase the read pages write in lowercase — a common word the
+   asker capitalized ("no Ato 3"): "Trumbo Baldur's Gate Ato" gave 5/20
+   on-subject results, "Trumbo Baldur's Gate" 18/20. It runs one
+   short search per term: "term + confirmed names" (one extra
    common word took "Trumbo BG3" from 11 relevant results to 0). Up to
    `_BRIDGE_PAGES` new pages are read within the remaining char budget and
    go FIRST in the dossier: at the end, behind 6 pages that "don't mention
@@ -202,12 +229,35 @@ Pipeline in `tools/research.py::research_web`:
 5. Final answer appends the source URL list assembled in code (not asked of
    the model) — the model unreliably keeps URLs verbatim in prose.
 
+Reasoning is spent only where it decides the answer: `_rerank`, `_summarize`
+and `analyze_urls` call `chat(..., reasoning=True)`, which merges
+`REASONING_BODY` over `EXTRA_BODY` when `USE_REASONING=true` (default
+false; empty `REASONING_BODY` = the Qwen3.x/llama.cpp format); query
+variants and the bridge picker stay on `EXTRA_BODY` alone. Measured 11/09/2026 (qwen3.8:27B, 10 questions
+x 2 alternating rounds, blind grading): "low" on EVERY call gave +4.5
+points (18 of 20 pairs) for +34 s per search (40 -> 74 s), and the gain was
+in triage too (the official doc was read only with reasoning), so don't move
+`_rerank` back to the short calls without measuring. "low" only on these
+three calls, same design: +5.25 points (86.0 -> 91.25, 18 of 20) for +30 s
+(40.0 -> 69.7 s). The cost lives where the gain is (Q2 log: triage +10 s,
+summary +21 s); the short calls were ~4 s of it.
+
 `server._ChainGuard` (FastMCP middleware) bounds a calling agent that
 searches in circles, rewriting the question each time (which dodges
 `research_web`'s same-question cache): `research_web`/`analyze_urls` calls
 in one MCP session that start within `_CHAIN_GAP_SECONDS` of the previous
 return are one agent turn; from the 3rd on the result carries a stop note,
 the 5th doesn't run. Structural (timing + session), never the subject.
+It also keeps the turn's earlier `research_web` questions and hands them
+to the tool through the `research.chain_questions` contextvar (FastMCP runs
+sync tools via `anyio.to_thread`, which carries context). When a call
+shares a name phrase with an earlier one of the turn and dropped another
+(`_carried_from_chain`: the same question rewritten, the user's name swapped
+for the agent's guess — observed: "…Pai Putrefato (Rotting Father)…" then
+"…quest Rotting Father chain how to start"), the earlier question's names
+query joins the searches and the earlier question goes to triage, bridge
+and summary as context. A call about something else in the same turn shares
+no name and runs untouched.
 
 `read_url` is the plain counterpart: single URL, full text, no LLM, no
 budget truncation (`WebScraper(limit=None)`).
