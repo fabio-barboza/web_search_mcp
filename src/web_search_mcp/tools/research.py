@@ -1255,7 +1255,38 @@ def _carried_from_chain(query: str, earlier: tuple[str, ...]) -> tuple[str, tupl
     return "", ()
 
 
-def research_web(query: str, recent: bool = False) -> str:
+# Guarda de tamanho, não medida: a mensagem vai inteira como contexto para a
+# triagem, a ponte e o resumo, e um texto longo colado pelo usuário estouraria
+# o contexto do resumo (HTTP 400 joga fora a pesquisa inteira).
+_USER_MESSAGE_MAX_CHARS = 2000
+
+
+def _carried_from_user(query: str, user_message: str) -> tuple[str, tuple[str, ...]]:
+    """(mensagem do usuário que vale como contexto, busca dos nomes dela) ou ("", ()).
+
+    O agente que chama traduz ou troca o nome que o usuário escreveu antes
+    mesmo da primeira pesquisa. Medido em 11/09/2026 (qwen3.8:27B com os
+    parâmetros do Open WebUI, só a 1ª chamada, 20 por braço): a query manteve
+    o nome do usuário em 7/20 ("Rotting Bride", "Rotten Brain" no lugar de
+    "Pai Putrefato"); com user_message obrigatório no esquema, o campo veio
+    literal em 20/20. Opcional ele veio em 9/20 — por isso é obrigatório.
+
+    Diferente de _carried_from_chain, não exige nome em comum: a mensagem é
+    a do turno atual, então é a mesma pergunta por definição, e a query
+    traduzida pode não dividir nome nenhum com ela. Basta a query ter
+    perdido uma frase-nome da mensagem. Quando a mensagem só repete a query
+    (agente que obedece), nada muda. Sinal de forma, nunca de assunto.
+    """
+    message = " ".join((user_message or "").split())[:_USER_MESSAGE_MAX_CHARS]
+    folded_query = _fold(query)
+    names = _name_phrases(_PARENTHETICAL_RE.sub(" ", message))
+    if not any(not _mentions(p, folded_query) for p in names):
+        return "", ()
+    names_query = _names_query(message)
+    return message, ((names_query,) if names_query else ())
+
+
+def research_web(query: str, recent: bool = False, *, user_message: str) -> str:
     """Pesquisa na web e devolve um resumo com fontes.
 
     Use para qualquer informação que você não saiba com certeza — e também
@@ -1291,21 +1322,28 @@ def research_web(query: str, recent: bool = False) -> str:
             (clima, cotação, placar, notícia de agora). False para fatos
             estáveis (história, biografia, conceitos, documentação), pois
             filtrar por data descarta as fontes boas.
+        user_message: A última mensagem do usuário, copiada literalmente, do jeito que ele
+            escreveu: sem traduzir, sem corrigir, sem resumir.
     """
-    logger.info("research_web chamada: query=%r recent=%s", query, recent)
+    logger.info("research_web chamada: query=%r recent=%s user_message=%r", query, recent, user_message)
 
     cached = _cached_result(query)
     if cached is not None:
         logger.warning("research_web: repetição detectada, devolvendo resultado anterior: query=%r", query)
         return _REPEAT_NOTE + cached
 
-    # Pergunta reescrita no mesmo turno: a anterior entra como contexto na
-    # triagem, na ponte e no resumo, e a busca pelos nomes dela roda junto.
-    # "asked" em minúscula no parêntese para não virar frase-nome.
-    prior, carried = _carried_from_chain(query, chain_questions.get())
-    asked = f'{query}\n(pergunta anterior nesta conversa: "{prior}")' if prior else query
+    # Query que perdeu um nome da mensagem do usuário, ou pergunta reescrita
+    # no mesmo turno: o texto de origem entra como contexto na triagem, na
+    # ponte e no resumo, e a busca pelos nomes dele roda junto. O rótulo do
+    # parêntese vai em minúscula para não virar frase-nome.
+    prior, carried = _carried_from_user(query, user_message)
+    label = "mensagem do usuário"
+    if not prior:
+        prior, carried = _carried_from_chain(query, chain_questions.get())
+        label = "pergunta anterior nesta conversa"
+    asked = f'{query}\n({label}: "{prior}")' if prior else query
     if prior:
-        logger.info("research_web: pergunta reescrita no turno; contexto %r, buscas %r", prior, carried)
+        logger.info("research_web: query perdeu nome (%s); contexto %r, buscas %r", label, prior, carried)
 
     _search.reset_health()
     try:

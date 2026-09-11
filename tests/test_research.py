@@ -136,11 +136,73 @@ class TestCarriedFromChain:
         monkeypatch.setattr(research, "_summarize", summarize)
         token = research.chain_questions.set((first,))
         try:
-            research.research_web(second)
+            research.research_web(second, user_message=second)
         finally:
             research.chain_questions.reset(token)
         assert seen["carried"] == ("Baldur's Gate Pai Putrefato Ato",)
         assert first in seen["asked"] and first in seen["summary_q"]
+        assert "Pai Putrefato" in research._name_phrases(seen["asked"])
+
+
+class TestCarriedFromUser:
+    """A query que o agente mandou x a mensagem que o usuário escreveu."""
+
+    MESSAGE = "Como incia a chain do Pai Putrefato nop ato 3 em BG3 e quais os passos a serem seguidos?"
+
+    @pytest.mark.parametrize("query", [
+        # Queries reais do agente, medidas em 11/09/2026: nenhuma divide nome
+        # com a mensagem, e a de _carried_from_chain não pegaria nenhuma.
+        "Baldur's Gate 3 How to start the Rotting Bride quest Act 3 steps guide",
+        "Baldur's Gate 3 The Rotten Brain quest how to start Act 3 steps guide",
+        "BG3 The Rotfather quest Act 3 how to start and steps",
+    ])
+    def test_query_that_lost_the_users_name_carries_the_message(self, query):
+        prior, carried = research._carried_from_user(query, self.MESSAGE)
+        assert prior == self.MESSAGE
+        assert carried == ("Pai Putrefato BG3",)
+
+    @pytest.mark.parametrize("query,message", [
+        (MESSAGE, MESSAGE),                                                  # agente obediente
+        ("como iniciar a quest chain do pai putrefato no ato 3 de BG3", MESSAGE),  # caixa não conta
+        ("Quem foi a Tia Ciata?", "quem foi a tia ciata"),                   # mensagem sem nome
+        ("Qual a cotação do dólar hoje?", "e o dólar?"),
+        ("Quem foi Pixinguinha?", ""),                                       # campo vazio
+    ])
+    def test_nothing_lost_is_left_alone(self, query, message):
+        assert research._carried_from_user(query, message) == ("", ())
+
+    def test_long_message_is_cut(self):
+        message = "Quem foi a Tia Ciata? " + "x " * 5000
+        prior, _ = research._carried_from_user("Who was Aunt Ciata?", message)
+        assert prior.startswith("Quem foi a Tia Ciata?")
+        assert len(prior) == research._USER_MESSAGE_MAX_CHARS
+
+    def test_research_web_hands_message_to_search_triage_and_summary(self, monkeypatch):
+        seen = {}
+
+        def collect(q, recent, carried=()):
+            seen["carried"] = carried
+            return [{"url": "https://a.example"}]
+
+        def select(asked, results, recent):
+            seen["asked"] = asked
+            return [({"title": "a"}, "https://a.example", "t")], []
+
+        def summarize(asked, dossier, recent):
+            seen["summary_q"] = asked
+            return "ok"
+
+        monkeypatch.setattr(research, "_collect_links", collect)
+        monkeypatch.setattr(research, "_select_and_read", select)
+        monkeypatch.setattr(research, "_summarize", summarize)
+        research.research_web(
+            "Baldur's Gate 3 How to start the Rotting Bride quest Act 3 steps guide",
+            user_message=self.MESSAGE,
+        )
+        assert seen["carried"] == ("Pai Putrefato BG3",)
+        assert self.MESSAGE in seen["asked"] and self.MESSAGE in seen["summary_q"]
+        assert "mensagem do usuário" in seen["asked"]
+        # A ponte tira os nomes daqui: o do usuário tem que estar entre eles.
         assert "Pai Putrefato" in research._name_phrases(seen["asked"])
 
 
@@ -472,13 +534,13 @@ class TestCollectLinks:
 class TestResearchWeb:
     def test_no_results_message(self):
         with patch.object(research, "_collect_links", return_value=[]):
-            result = research.research_web("pergunta sem resultado")
+            result = research.research_web("pergunta sem resultado", user_message="pergunta sem resultado")
         assert result.startswith("Nenhum resultado encontrado.")
 
     def test_all_pages_failed_message(self):
         with patch.object(research, "_collect_links", return_value=[{"url": "http://a.com"}]), \
              patch.object(research, "_read_pages", return_value=[]):
-            result = research.research_web("pergunta")
+            result = research.research_web("pergunta", user_message="pergunta")
         assert result == "Nenhuma das páginas encontradas pôde ser lida."
 
     def test_timestamp_present_with_offset(self):
@@ -486,7 +548,7 @@ class TestResearchWeb:
         with patch.object(research, "_collect_links", return_value=[{"url": "http://a.com"}]), \
              patch.object(research, "_read_pages", return_value=pages_read), \
              patch.object(research, "_summarize", return_value="resumo final"):
-            result = research.research_web("pergunta")
+            result = research.research_web("pergunta", user_message="pergunta")
 
         assert result.startswith("Pesquisa realizada em ")
         assert "UTC)." in result.splitlines()[0]
@@ -619,7 +681,7 @@ class TestRepeatGuard:
     def test_exact_repeat_returns_cached_with_note(self):
         research._remember_result("qual a build de força?", "RESULTADO ANTERIOR")
         with patch.object(research, "_collect_links") as collect:
-            out = research.research_web("Qual a build de força?")
+            out = research.research_web("Qual a build de força?", user_message="Qual a build de força?")
         collect.assert_not_called()
         assert out.startswith(research._REPEAT_NOTE)
         assert "RESULTADO ANTERIOR" in out
@@ -675,10 +737,10 @@ class TestRepeatGuard:
 
     def test_empty_result_also_cached(self):
         with patch.object(research, "_collect_links", return_value=[]):
-            first = research.research_web("busca sem resultado nenhum xyz")
+            first = research.research_web("busca sem resultado nenhum xyz", user_message="busca sem resultado nenhum xyz")
         assert "Nenhum resultado" in first
         with patch.object(research, "_collect_links") as collect:
-            second = research.research_web("busca sem resultado nenhum xyz")
+            second = research.research_web("busca sem resultado nenhum xyz", user_message="busca sem resultado nenhum xyz")
         collect.assert_not_called()
         assert second.startswith(research._REPEAT_NOTE)
 
@@ -785,7 +847,7 @@ class TestIndexReserve:
             with patch.object(research, "_read_pages", side_effect=fake_read), \
                  patch.object(research, "_collect_links", return_value=[{"url": "https://a.com/x"}]), \
                  patch.object(research, "_summarize", return_value="resumo"):
-                research.research_web(f"pergunta {recent}", recent=recent)
+                research.research_web(f"pergunta {recent}", recent=recent, user_message="pergunta")
             assert seen["flag"] is recent
 
     def test_dossie_marca_capa(self):

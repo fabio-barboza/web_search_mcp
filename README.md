@@ -376,7 +376,7 @@ em vez de deixar `*`.
 
 ## Tools
 
-### `research_web(query: str, recent: bool = False) -> str`
+### `research_web(query: str, recent: bool = False, *, user_message: str) -> str`
 
 Pesquisa a pergunta na web (gera variantes de busca — sempre incluindo a
 pergunta em palavras-chave, com os nomes intactos —, roda em paralelo, faz
@@ -395,6 +395,17 @@ Use `recent=True` só quando a resposta depende do dia de hoje (clima,
 cotação, placar, notícia). Para fatos estáveis (história, biografia,
 conceitos), deixe `recent=False` — filtrar por data descarta as melhores
 fontes.
+
+`user_message` (obrigatório) é a última mensagem do usuário, copiada
+literalmente. O agente que chama costuma traduzir ou trocar o nome que o
+usuário escreveu antes mesmo da primeira pesquisa ("Pai Putrefato" vira
+"Rotting Bride"). Quando a `query` perdeu um nome que está na mensagem, a
+pesquisa também busca pelos nomes da mensagem e usa o texto original na
+triagem e no resumo. Se a mensagem só repete a `query`, nada muda. Medido
+em 11/09/2026 com o agente do Open WebUI (qwen3.8:27B): resposta certa em
+10 de 10 conversas, contra 6 de 10 sem o campo, com menos pesquisas por
+conversa. Opcional, o agente só preenchia o campo em 9 de 20 chamadas; por
+isso ele é obrigatório.
 
 A mesma pergunta reescrita logo em seguida (mesmo conjunto de palavras de
 conteúdo, em qualquer ordem) devolve o resultado anterior em vez de buscar

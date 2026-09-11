@@ -42,7 +42,7 @@ for n, (q, recent) in enumerate(Q, 1):
     research._recent_calls.clear()
     t = time.monotonic()
     try:
-        a = research.research_web(q, recent)
+        a = research.research_web(q, recent, user_message=q)
     except Exception as e:
         a = f"ERRO: {e!r}"
     out.append({"n": n, "seconds": round(time.monotonic() - t, 1), "answer": a})

@@ -259,6 +259,25 @@ query joins the searches and the earlier question goes to triage, bridge
 and summary as context. A call about something else in the same turn shares
 no name and runs untouched.
 
+`research_web` takes a REQUIRED `user_message`: the user's latest message,
+copied verbatim. The chain carry above only helps from the 2nd call on;
+the agent often loses the user's name before the FIRST one (measured
+11/09/2026, qwen3.8:27B with Open WebUI's params, first call only: the
+query kept "Pai Putrefato" in 7/20 — "Rotting Bride", "Rotten Brain"
+instead). `_carried_from_user` fires when the query lost a name phrase of
+the message — no shared name required, the message is this turn's by
+definition — and does what the chain carry does: the message's names
+query joins the searches and the message goes to triage, bridge and summary
+as context (chain carry is the fallback). A message that just repeats the
+query changes nothing. Cut at `_USER_MESSAGE_MAX_CHARS` (a size guard for
+pasted text, not measured). Measured: optional, the agent filled it 9/20;
+required, 20/20 verbatim. End to end (simulated Open WebUI agent, 10
+conversations per arm, alternating): right answer 10/10 vs 6/10, 1.7 vs
+2.3 searches per conversation, 138 vs 174 s; with reasoning off, 10/10 vs
+7/10. Keep it required and keep its description short and literal: an
+optional field with a sentence about "when the query needs rephrasing"
+dropped the query's own name retention to 3/20.
+
 `read_url` is the plain counterpart: single URL, full text, no LLM, no
 budget truncation (`WebScraper(limit=None)`).
 

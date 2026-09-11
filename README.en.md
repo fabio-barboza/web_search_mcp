@@ -387,7 +387,7 @@ to the origins you use, instead of leaving `*`.
 
 ## Tools
 
-### `research_web(query: str, recent: bool = False) -> str`
+### `research_web(query: str, recent: bool = False, *, user_message: str) -> str`
 
 Researches the question on the web (generates search variants — always
 including the question as keywords, names intact —, runs them in parallel,
@@ -406,6 +406,17 @@ list of URLs read goes at the end.
 Use `recent=True` only when the answer depends on today (weather, exchange
 rate, score, news). For stable facts (history, biography, concepts), leave
 `recent=False` — filtering by date throws away the best sources.
+
+`user_message` (required) is the user's latest message, copied verbatim.
+The calling agent often translates or swaps the name the user wrote before
+the very first search ("Pai Putrefato" becomes "Rotting Bride"). When the
+`query` lost a name that is in the message, the research also searches for
+the message's names and uses the original text in triage and summary. If
+the message just repeats the `query`, nothing changes. Measured on
+2026-09-11 with the Open WebUI agent (qwen3.8:27B): right answer in 10 of
+10 conversations, against 6 of 10 without the field, with fewer searches
+per conversation. As an optional field the agent filled it in only 9 of 20
+calls; that is why it is required.
 
 The same question rephrased right afterwards (same set of content words, in
 any order) returns the previous result instead of searching again: the tool

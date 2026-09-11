@@ -18,6 +18,15 @@ class TestTools:
         tools = _run(go())
         assert {t.name for t in tools} == {"read_url", "research_web", "analyze_urls"}
 
+    def test_research_web_requires_user_message(self):
+        """Obrigatório: opcional, o agente preencheu 9/20 (medido em 11/09/2026)."""
+        async def go():
+            async with Client(server.mcp) as client:
+                return await client.list_tools()
+
+        tool = next(t for t in _run(go()) if t.name == "research_web")
+        assert "user_message" in tool.inputSchema["required"]
+
 
 class TestPrompt:
     def test_pesquisador_prompt_registered(self):

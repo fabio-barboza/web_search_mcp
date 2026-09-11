@@ -128,7 +128,7 @@ class TestSnippetSources:
         with patch.object(research, "_collect_links", return_value=[page[0], unread]), \
              patch.object(research, "_select_and_read", return_value=([page], [unread])), \
              patch.object(research, "_summarize", return_value="fato [2]") as summ:
-            out = research.research_web("pergunta sobre trecho")
+            out = research.research_web("pergunta sobre trecho", user_message="pergunta sobre trecho")
         dossier = summ.call_args.args[1]
         assert "FONTE [2]" in dossier and "resultado de busca não lido" in dossier
         assert "trecho que liga os nomes" in dossier
