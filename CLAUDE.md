@@ -180,6 +180,23 @@ Pipeline in `tools/research.py::research_web`:
    `MODEL_CONTEXT_TOKENS - MODEL_RESERVE_TOKENS`) runs out. A dead/blocked/
    too-short page doesn't consume a budget slot — the pool (`RESEARCH_POOL_SIZE`)
    backfills it.
+   `_bridge` — when a name phrase of the question (`_name_phrases`:
+   mid-sentence capitals or letter+digit tokens, joined across
+   `_NAME_CONNECTORS` like the "do" in "Lei do Bem") appears in no page read,
+   `_bridge_terms` picks title-case words that co-occur with it in the
+   pool's titles/snippets, sit in ≥2 candidates and ≤10% of the pool (rarest
+   first; the candidate's own site name and ALL-CAPS title words excluded),
+   and runs one short search per term: "term + confirmed names" (one extra
+   common word took "Trumbo BG3" from 11 relevant results to 0). Up to
+   `_BRIDGE_PAGES` new pages are read within the remaining char budget and
+   go FIRST in the dossier: at the end, behind 6 pages that "don't mention
+   the quest", the summary denied the question with the right pages in hand.
+   Measured 10/09/2026 on "Pai Putrefato" (a localized name no English page
+   uses): v0.2.1 0/3, bridge 3/3; it fired on none of the other 9 eval
+   questions. The answering page was already in the pool — nothing linked
+   the two names for the triage. A filter dropping LLM variants without the
+   question's names was measured first and rejected (0/3, −6.7 on the news
+   question: a variant covering another facet of the question has no name).
 3. `_render_dossier` — concatenates page content with source headers.
 4. `_summarize` — one more LLM call, cites URLs, dated, in pt-BR.
 5. Final answer appends the source URL list assembled in code (not asked of

@@ -38,6 +38,7 @@ sees the raw material.
                      │     SearXNG as fallback)                    │
                      │  3. triages by title/snippet (LLM), opens   │
                      │     only the picked pages                   │
+                     │     + bridge when no read page has the name │
                      │  4. builds the dossier ... 15-50k chars     │
                      │  5. summarizes with sources (LLM)           │
        summary  ◄──  │                          ....... ~700 tokens│
@@ -216,7 +217,7 @@ and starts anyway — `read_url` works without it, `research_web` and
 ### From GitHub (no clone needed)
 
 ```bash
-uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.1 web-search-mcp
+uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.2 web-search-mcp
 ```
 
 Registering in Claude Code:
@@ -225,18 +226,18 @@ Registering in Claude Code:
 claude mcp add web-search \
   -e SEARXNG_URL=http://localhost:8886 \
   -e MODEL_BASE_URL=http://localhost:8200/v1 \
-  -- uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.1 web-search-mcp
+  -- uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.2 web-search-mcp
 ```
 
 Installed this way, `.env` is not read: the whole configuration comes in
 through `-e` — see [Configuring the installed server](#configuring-the-installed-server).
-`@v0.2.1` pins that release. Swap it for `@main` to always track the tip of
+`@v0.2.2` pins that release. Swap it for `@main` to always track the tip of
 the branch, or for any other tag or commit.
 
 To keep the command fixed on your PATH instead of resolving it on every run:
 
 ```bash
-uv tool install git+https://github.com/fabio-barboza/web_search_mcp@v0.2.1
+uv tool install git+https://github.com/fabio-barboza/web_search_mcp@v0.2.2
 ```
 
 ### From a clone (development)
@@ -298,7 +299,7 @@ Or installed, passing the configuration through the environment:
 ```bash
 SEARXNG_URL=http://localhost:8886 \
 MODEL_BASE_URL=http://localhost:8200/v1 \
-uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.1 web-search-mcp --http
+uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.2 web-search-mcp --http
 ```
 
 It listens on `http://{MCP_HOST}:{MCP_PORT}/mcp` (default `127.0.0.1:8765`).
@@ -345,7 +346,7 @@ Environment=TOR_CHANNELS=127.0.0.1:9060:9061,127.0.0.1:9070:9071,127.0.0.1:9080:
 Environment=SEARXNG_URL=http://localhost:8886
 # TOR_CONTROL_PASSWORD lives outside the unit, in a file only you can read (chmod 600)
 EnvironmentFile=%h/.config/web-search-mcp/secrets.env
-ExecStart=%h/.local/bin/uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.1 web-search-mcp --http
+ExecStart=%h/.local/bin/uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.2 web-search-mcp --http
 Restart=on-failure
 
 [Install]
@@ -392,7 +393,11 @@ Researches the question on the web (generates search variants — always
 including the question as keywords, names intact —, runs them in parallel,
 triages the candidates by title and snippet and reads only the picked ones)
 and returns a summary in Brazilian
-Portuguese, with a date/time stamp. Every fact ends with a **markdown link to
+Portuguese. When no page read contains a name from the question (a
+localized name, a nickname), it runs one short search for the word that
+travels with that name in the result titles and reads those pages first —
+that is what links "Pai Putrefato" to "Mystic Carrion". The summary carries
+a date/time stamp. Every fact ends with a **markdown link to
 the page it came from**, built in code from the URL actually read — not asked
 of the model. A `[n]` marker the model invents for a source that doesn't
 exist is deleted, instead of being left pointing at nothing. The numbered
@@ -583,7 +588,7 @@ claude mcp add web-search \
   -e MODEL_BASE_URL=http://localhost:8200/v1 \
   -e MODEL_CONTEXT_TOKENS=65536 \
   -e TZ=America/Sao_Paulo \
-  -- uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.1 web-search-mcp
+  -- uvx --from git+https://github.com/fabio-barboza/web_search_mcp@v0.2.2 web-search-mcp
 ```
 
 Note that `MODEL` isn't there: left out, the server uses the model already
@@ -597,7 +602,7 @@ The command above writes this to `.mcp.json` (project scope) or to
   "mcpServers": {
     "web-search": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/fabio-barboza/web_search_mcp@v0.2.1", "web-search-mcp"],
+      "args": ["--from", "git+https://github.com/fabio-barboza/web_search_mcp@v0.2.2", "web-search-mcp"],
       "env": {
         "SEARXNG_URL": "http://localhost:8886",
         "MODEL_BASE_URL": "http://localhost:8200/v1"

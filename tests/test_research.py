@@ -56,6 +56,123 @@ class TestGenerateQueries:
         ]
 
 
+class TestNamePhrases:
+    @pytest.mark.parametrize("question,phrases", [
+        ("Como inicia a chain do Pai Putrefato no ato 3 de BG3?", ["Pai Putrefato", "BG3"]),
+        ("O que diz a Lei do Bem sobre incentivo à inovação?", ["Lei do Bem"]),
+        ("Quem foi a Tia Ciata?", ["Tia Ciata"]),
+        ("Qual a diferença entre o Pix Automático e o Pix Agendado?", ["Pix Automático", "Pix Agendado"]),
+        ("Como funciona o fluxo de autorização OAuth2 com PKCE?", ["OAuth2", "PKCE"]),
+        ("Qual a cotação atual do dólar em reais?", []),
+        ("O que é a doença cobreiro e como trata?", []),
+    ])
+    def test_phrases_come_from_token_shape(self, question, phrases):
+        assert research._name_phrases(question) == phrases
+
+    def test_mentions_matches_whole_phrase_folded(self):
+        assert research._mentions("Pix Automático", research._fold("O PIX  automatico chegou"))
+        assert not research._mentions("Pai Putrefato", research._fold("o pai dele, putrefato"))
+        assert not research._mentions("BG3", research._fold("BG30 é outro"))
+
+
+def _pool(*titles):
+    return [{"title": t, "url": f"https://site{i}.example/p", "content": ""} for i, t in enumerate(titles)]
+
+
+class TestBridgeTerms:
+    """Os dois lados, em assuntos sem relação entre si (jogo, música)."""
+
+    def test_picks_corroborated_rare_neighbour_of_the_missing_name(self):
+        filler = [f"Baldur's Gate 3 guide part {i}" for i in range(20)]
+        pool = _pool(
+            "Baldur's Gate 3 : Pista de Trumbo, Servo do Pai Putrefato - YouTube",
+            "BALDUR'S GATE 3 - WHY YOU SHOULD SAVE TRUMBO!!!",
+            *filler,
+        )
+        terms = research._bridge_terms(["Pai Putrefato"], pool, "Como inicia a chain do Pai Putrefato?")
+        # Baldur's/Gate: pool inteiro (não distingue). Pista/Servo: um candidato só.
+        assert terms == ["Trumbo"]
+
+    def test_other_subject_nickname_to_real_name(self):
+        pool = _pool(
+            "Luiz Gonzaga, o Rei do Baião - Wikipédia",
+            "Luiz Gonzaga: biografia e discografia",
+            *[f"História do forró, parte {i}" for i in range(15)],
+        )
+        terms = research._bridge_terms(["Rei do Baião"], pool, "Quem foi o Rei do Baião?")
+        assert set(terms) == {"Luiz", "Gonzaga"}
+
+    def test_site_name_in_title_is_not_a_bridge(self):
+        pool = [
+            {"title": "Pista de Trumbo, Servo do Pai Putrefato - YouTube", "url": "https://www.youtube.com/watch?v=1", "content": ""},
+            {"title": "SAVE TRUMBO - YouTube", "url": "https://www.youtube.com/watch?v=2", "content": ""},
+            *_pool(*[f"guia {i}" for i in range(20)]),
+        ]
+        assert research._bridge_terms(["Pai Putrefato"], pool, "Pai Putrefato?") == ["Trumbo"]
+
+    def test_shouted_title_words_are_not_names_and_rarest_wins(self):
+        """Medido: em título todo em maiúsculas, "SAVE"/"HELPING" ganhavam de
+        "Trumbo" por serem mais frequentes no pool."""
+        pool = _pool(
+            "Pista de Trumbo, Servo do Pai Putrefato",
+            "WHY YOU SHOULD SAVE TRUMBO!!! HELPING THE ROTTEN FATHER - Pai Putrefato",
+            "Save the Gith Egg", "Save Karlach", "Helping hand guide", "Helping Dammon",
+            "Seguidores de Trumbo",
+            *[f"guia {i}" for i in range(40)],
+        )
+        assert research._bridge_terms(["Pai Putrefato"], pool, "Pai Putrefato?") == ["Trumbo"]
+
+    def test_nothing_when_no_candidate_carries_the_name(self):
+        pool = _pool("Luiz Gonzaga: biografia", "Luiz Gonzaga discografia")
+        assert research._bridge_terms(["Rei do Baião"], pool, "Quem foi o Rei do Baião?") == []
+
+    def test_neighbour_seen_only_once_is_not_corroborated(self):
+        pool = _pool("Pista de Trumbo, Servo do Pai Putrefato", *[f"outro {i}" for i in range(10)])
+        assert research._bridge_terms(["Pai Putrefato"], pool, "Pai Putrefato?") == []
+
+
+class TestBridge:
+    QUESTION = "Como inicia a chain do Pai Putrefato no ato 3 de BG3?"
+    POOL = _pool(
+        "Baldur's Gate 3 : Pista de Trumbo, Servo do Pai Putrefato - YouTube",
+        "BALDUR'S GATE 3 - WHY YOU SHOULD SAVE TRUMBO!!!",
+        *[f"Baldur's Gate 3 guide part {i}" for i in range(20)],
+    )
+
+    def test_missing_name_triggers_short_search_with_confirmed_names(self):
+        read = [({"title": "Act 3"}, "https://wiki.example/act3", "BG3 Act 3 walkthrough, Lower City quests")]
+        found = {"title": "Thrumbo - BG3 Wiki", "url": "https://bg3.example/Thrumbo", "content": ""}
+        with patch.object(research, "_search_one_safe", return_value=[found]) as search, \
+             patch.object(research, "_rerank", return_value=None), \
+             patch.object(research, "_read_pages", return_value=[(found, found["url"], "texto")]) as reader:
+            extra = research._bridge(self.QUESTION, False, self.POOL, read)
+        search.assert_called_once_with(("Trumbo BG3", False))
+        assert extra == [(found, found["url"], "texto")]
+        assert reader.call_args.kwargs["page_budget"] == research._BRIDGE_PAGES
+        assert reader.call_args.kwargs["char_budget"] > 0
+
+    def test_bridge_pages_lead_the_dossier(self):
+        page = ({"title": "a"}, "https://a.example", "texto")
+        extra = ({"title": "b"}, "https://b.example", "ponte")
+        with patch.object(research, "_rerank", return_value=[page[0]]), \
+             patch.object(research, "_read_pages", return_value=[page]), \
+             patch.object(research, "_bridge", return_value=[extra]):
+            pages, _ = research._select_and_read(self.QUESTION, [{"url": "https://a.example"}], False)
+        assert pages == [extra, page]
+
+    def test_no_search_when_every_name_was_read(self):
+        read = [({"title": "x"}, "https://x.example", "No BG3, o Pai Putrefato fica na mansão")]
+        with patch.object(research, "_search_one_safe") as search:
+            assert research._bridge(self.QUESTION, False, self.POOL, read) == []
+        search.assert_not_called()
+
+    def test_no_search_for_question_without_names(self):
+        read = [({"title": "x"}, "https://x.example", "cotação")]
+        with patch.object(research, "_search_one_safe") as search:
+            assert research._bridge("qual a cotação do dólar hoje", True, self.POOL, read) == []
+        search.assert_not_called()
+
+
 class TestKeywordQuery:
     @pytest.mark.parametrize("question,expected", [
         ("Quem foi a Tia Ciata?", "Tia Ciata"),
@@ -154,6 +271,14 @@ class TestReadPages:
             pages = research._read_pages([{"url": "http://x.com/gigante"}])
             assert len(pages) == 1
             assert len(research._render_dossier(pages)) == research._dossier_char_budget()
+
+    def test_explicit_char_budget_applies_from_first_page(self):
+        """A leitura da ponte complementa um dossiê que já existe: página que
+        não cabe no que sobrou fica de fora, mesmo sendo a primeira."""
+        with patch.object(research._scraper, "read_many_dated", side_effect=lambda urls, mark_index=False: [("c" * 5000, None, False) for _ in urls]), \
+             patch.object(config, "RESEARCH_MAX_WAVES", 1):
+            assert research._read_pages([{"url": "http://x.com/a"}], page_budget=1, char_budget=1000) == []
+            assert len(research._read_pages([{"url": "http://x.com/a"}], page_budget=1, char_budget=10000)) == 1
 
 
 class TestRenderDossier:

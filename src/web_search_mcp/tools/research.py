@@ -139,6 +139,51 @@ def _fold(text: str) -> str:
     return "".join(c for c in folded if not unicodedata.combining(c))
 
 
+# Partículas que ficam DENTRO de um nome ("Lei do Bem", "Rei do Baião",
+# "Bank of America"). Outra palavra de função entre dois nomes os separa:
+# "OAuth2 com PKCE" são dois nomes, não um. Mecânica de língua, não assunto.
+_NAME_CONNECTORS = frozenset("de do da dos das of del di du von van".split())
+
+
+def _name_phrases(question: str) -> list[str]:
+    """Nomes da pergunta agrupados em frase, na grafia original.
+
+    Nome é reconhecido pelo formato do token, nunca pelo assunto: maiúscula
+    fora do início da frase ("Pai Putrefato", "Tia Ciata") ou letra e dígito
+    juntos ("BG3", "OAuth2"). Tokens de nome vizinhos formam uma frase só,
+    inclusive com uma partícula de _NAME_CONNECTORS no meio ("Lei do Bem"): "pai" sozinho
+    casa com qualquer texto em português, "Pai Putrefato" não. Pergunta sem
+    nome ("qual a cotação do dólar") devolve vazio.
+    """
+    tokens = [t.rstrip(".'’/-") for t in _KEYWORD_TOKEN_RE.findall(question)]
+    is_name = [
+        bool(t) and (
+            (i > 0 and t[0].isupper())
+            or (any(c.isalpha() for c in t) and any(c.isdigit() for c in t))
+        )
+        for i, t in enumerate(tokens)
+    ]
+    phrases: list[str] = []
+    run: list[str] = []
+    for i, token in enumerate(tokens):
+        if is_name[i]:
+            run.append(token)
+        elif run and _fold(token) in _NAME_CONNECTORS and i + 1 < len(tokens) and is_name[i + 1]:
+            run.append(token)
+        elif run:
+            phrases.append(" ".join(run))
+            run = []
+    if run:
+        phrases.append(" ".join(run))
+    return phrases
+
+
+def _mentions(phrase: str, folded_text: str) -> bool:
+    """A frase aparece inteira, como palavras, no texto já dobrado."""
+    words = [re.escape(w) for w in _fold(phrase).split()]
+    return re.search(r"(?<!\w)" + r"\s+".join(words) + r"(?!\w)", folded_text) is not None
+
+
 def _generate_queries(question: str) -> list[str]:
     """Gera variantes de busca. A pergunta original sempre entra primeiro.
 
@@ -498,10 +543,16 @@ def _label_citations(summary: str, pages_read: list[tuple[dict, str, str]]) -> s
     return _CITATION_RE.sub(swap, summary)
 
 
+def _page_cost(r: dict, url: str, page: str) -> int:
+    """Caracteres que a página ocupa no dossiê, com o cabeçalho de _render_dossier."""
+    return len(page) + len(url) + len(r.get("title", "")) + len(r.get("content", "")) + 64
+
+
 def _read_pages(
     candidates: list[dict],
     page_budget: int | None = None,
     index_first_class: bool = False,
+    char_budget: int | None = None,
 ) -> list[tuple[dict, str, str]]:
     """Lê candidatos em ondas até juntar RESEARCH_PAGE_BUDGET páginas boas.
 
@@ -523,7 +574,12 @@ def _read_pages(
     queue = [(r, u) for r, u in queue if u]
     budget = page_budget or config.RESEARCH_PAGE_BUDGET
 
-    char_budget = _dossier_char_budget()
+    # Sem char_budget explícito, a primeira página entra mesmo acima do teto:
+    # dossiê vazio não responde nada. Com ele (a leitura da ponte, que
+    # complementa um dossiê que já existe), o teto vale desde a primeira.
+    first_always = char_budget is None
+    if char_budget is None:
+        char_budget = _dossier_char_budget()
     chars_used = 0
 
     def admit(r: dict, url: str, page: str) -> bool:
@@ -531,8 +587,8 @@ def _read_pages(
         nonlocal chars_used
         # _render_dossier põe cabeçalho (título, URL, resumo da busca)
         # antes de cada página; o orçamento conta isso também.
-        cost = len(page) + len(url) + len(r.get("title", "")) + len(r.get("content", "")) + 64
-        if pages_read and chars_used + cost > char_budget:
+        cost = _page_cost(r, url, page)
+        if (pages_read or not first_always) and chars_used + cost > char_budget:
             logger.info(
                 "_read_pages: orçamento de contexto atingido (%d de %d caracteres, "
                 "%d páginas); parando de ler e resumindo o que já tem",
@@ -728,6 +784,122 @@ def _rerank(query: str, candidates: list[dict], k: int) -> list[dict] | None:
 _SNIPPET_SOURCES_MAX = 8
 
 
+# Ponte entre o nome da pergunta e o nome que as páginas usam.
+#
+# Pergunta com nome localizado ou apelido ("Pai Putrefato") acha, no pool,
+# páginas que usam outro nome para a mesma coisa, e a triagem não tem como
+# ligar os dois. Medido em 10/09/2026: o pool de 54 candidatos da pergunta do
+# Pai Putrefato já tinha a página que respondia (bg3.wiki/Mystic_Carrion), mas
+# o único candidato com o nome da pergunta era o título de um vídeo, "Pista de
+# Trumbo, Servo do Pai Putrefato", e nenhum trecho ligava "Trumbo" a "Mystic
+# Carrion". A execução com o filtro de variantes e a v0.2.1 negaram a
+# pergunta 6 de 6 vezes.
+#
+# O que liga os dois nomes é coocorrência, sinal que vale para qualquer
+# assunto: quando nenhuma página lida contém uma frase-nome da pergunta, os
+# títulos/trechos do pool que a contêm dizem com que outras palavras ela
+# anda. Palavra com maiúscula que aparece em pelo menos 2 candidatos
+# (corroborada) e em no máximo 10% do pool (distintiva) vira busca nova,
+# curta, com os nomes que as páginas já confirmaram. No mesmo pool, só
+# "Trumbo" passou (2 de 54); "Baldur's" está em todo lado, "Pista"/"Servo"
+# num candidato só, e "YouTube" é o site no título (sai por estar no host do
+# candidato). Medido no mesmo dia: "Trumbo BG3" trouxe
+# 11 de 20 resultados sobre o servo e o Mystic Carrion (bg3.wiki/Thrumbo, PC
+# Gamer); "Trumbo servo BG3", com uma palavra comum a mais, trouxe 0 — por
+# isso a busca leva só o termo e os nomes.
+_BRIDGE_MAX_TERMS = 2
+_BRIDGE_PAGES = 3
+_BRIDGE_MAX_DF_SHARE = 0.10
+_BRIDGE_MIN_TERM_CHARS = 3
+_BRIDGE_TOKEN_RE = re.compile(r"[^\W\d_][\w'’-]*")
+
+
+def _bridge_terms(missing: list[str], pool: list[dict], question: str) -> list[str]:
+    """Palavras que andam com as frases-nome sem página, corroboradas e raras no pool."""
+    texts = [_fold(f"{r.get('title', '')} {r.get('content', '')}") for r in pool]
+    holders = [
+        (f"{r.get('title', '')} {r.get('content', '')}", urlsplit(r.get("url", "")).netloc.lower())
+        for r, text in zip(pool, texts)
+        if any(_mentions(p, text) for p in missing)
+    ]
+    if not holders:
+        return []
+    df: dict[str, int] = {}
+    for text in texts:
+        for token in set(_BRIDGE_TOKEN_RE.findall(text)):
+            df[token] = df.get(token, 0) + 1
+    cap = max(2, int(len(pool) * _BRIDGE_MAX_DF_SHARE))
+    asked = {_fold(t) for t in re.findall(r"\w+", question)}
+    found: dict[str, tuple[int, str]] = {}
+    for text, host in holders:
+        for token in _BRIDGE_TOKEN_RE.findall(text):
+            token = token.rstrip("'’-")
+            folded = _fold(token)
+            # " - YouTube" no fim do título é o site, não o assunto: a primeira
+            # medição gastou uma das duas buscas em "YouTube BG3".
+            # Só grafia de nome: inicial maiúscula e o resto com minúscula. Em
+            # título todo em maiúsculas ("WHY YOU SHOULD SAVE TRUMBO!!!") toda
+            # palavra parece nome — medido: "SAVE"/"HELPING" viraram busca e a
+            # leitura foi para outra quest.
+            if (
+                len(token) < _BRIDGE_MIN_TERM_CHARS
+                or not (token[0].isupper() and any(c.islower() for c in token[1:]))
+                or folded in host
+                or folded in asked
+                or folded in _STOPWORDS
+                or not 2 <= df.get(folded, 0) <= cap
+            ):
+                continue
+            found.setdefault(folded, (df[folded], token))
+    # Mais raro primeiro: o piso de 2 já garante a corroboração, e entre os
+    # que passam, o menos espalhado é o mais específico do nome. Por
+    # frequência decrescente, a palavra comum ganhava do nome ("SAVE" > "Trumbo").
+    ranked = sorted(found.values(), key=lambda item: item[0])
+    return [token for _, token in ranked[:_BRIDGE_MAX_TERMS]]
+
+
+def _bridge(
+    query: str, recent: bool, pool: list[dict], pages_read: list[tuple[dict, str, str]]
+) -> list[tuple[dict, str, str]]:
+    """Páginas extras quando uma frase-nome da pergunta não aparece em nada lido."""
+    phrases = _name_phrases(query)
+    if not phrases or not pages_read:
+        return []
+    read_text = _fold("\n".join(page for _, _, page in pages_read))
+    missing = [p for p in phrases if not _mentions(p, read_text)]
+    if not missing:
+        return []
+    terms = _bridge_terms(missing, pool, query)
+    if not terms:
+        logger.info("_bridge: %r sem página lida e sem termo de ligação no pool", missing)
+        return []
+    present = [p for p in phrases if p not in missing]
+    anchor = " ".join(present) if present else missing[0]
+    queries = [f"{term} {anchor}" for term in terms]
+    logger.info("_bridge: %r sem página lida; termos %r; buscas %r", missing, terms, queries)
+
+    with ThreadPoolExecutor(max_workers=len(queries)) as ex:
+        per_query = list(ex.map(_search_one_safe, [(q, recent) for q in queries]))
+    # Só o que já foi LIDO sai. Página do pool que a triagem deixou de fora
+    # fica: é o caso que a ponte existe para resolver (bg3.wiki/Mystic_Carrion
+    # estava no pool, sem leitura).
+    read = {_normalize_url(url) for _, url, _ in pages_read}
+    fresh = [r for r in _merge_results(per_query, domain_cap=0) if _normalize_url(r.get("url", "")) not in read]
+    if not fresh:
+        return []
+    picks = _rerank(query, fresh, _BRIDGE_PAGES + _RERANK_SLACK) or fresh
+    used = sum(_page_cost(r, url, page) for r, url, page in pages_read)
+    remaining = _dossier_char_budget() - used
+    if remaining <= 0:
+        return []
+    extra = _read_pages(
+        _cap_per_domain(picks), page_budget=_BRIDGE_PAGES,
+        index_first_class=recent, char_budget=remaining,
+    )
+    logger.info("_bridge: %d página(s) extra(s): %r", len(extra), [url for _, url, _ in extra])
+    return extra
+
+
 def _select_and_read(
     query: str, results: list[dict], recent: bool
 ) -> tuple[list[tuple[dict, str, str]], list[dict]]:
@@ -741,7 +913,8 @@ def _select_and_read(
         return [], []
     picks = _rerank(query, results, config.RESEARCH_PAGE_BUDGET + _RERANK_SLACK)
     if picks is None:
-        return _read_pages(_cap_per_domain(results), index_first_class=recent), []
+        pages_read = _read_pages(_cap_per_domain(results), index_first_class=recent)
+        return _bridge(query, recent, results, pages_read) + pages_read, []
     # O teto de domínio vale na ordem da triagem: entre páginas do mesmo site
     # ficam as julgadas mais úteis, não as que o merge viu primeiro.
     picks = _cap_per_domain(picks)
@@ -753,7 +926,11 @@ def _select_and_read(
         pages_read = _read_pages(rest, index_first_class=recent)
     read = {url for _, url, _ in pages_read}
     unread = [r for r in picks if r.get("url", "").strip() not in read and (r.get("title") or r.get("content"))]
-    return pages_read, unread[:_SNIPPET_SOURCES_MAX]
+    # Páginas da ponte na frente: são as que contêm o nome que faltava. No
+    # fim do dossiê, depois de 6 páginas que "não mencionam a missão", o
+    # resumo negou a pergunta mesmo com elas lidas (medido em 10/09/2026).
+    bridged = _bridge(query, recent, results, pages_read)
+    return bridged + pages_read, unread[:_SNIPPET_SOURCES_MAX]
 
 
 def _snippet_sources(unread: list[dict]) -> list[tuple[dict, str, str]]:
