@@ -5,5 +5,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 evals/results/
+report-versus.md
 dist/
 search-engine/searxng/data/
