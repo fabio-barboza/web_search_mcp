@@ -399,3 +399,24 @@ chmod 600, same value as the production MCP's `TOR_CONTROL_PASSWORD`).
 Changes made there should be mirrored into `search-engine/` and vice-versa.
 Never bring up the repo's compose on this machine alongside the live ones:
 container names and ports collide.
+
+## Quando chamar as tools é decisão do cliente, não do servidor
+
+O `instructions=` do FastMCP (`server.py`) não chega ao modelo no Open WebUI:
+o cliente usa a descrição digitada à mão na conexão, e a política de chamada
+vem do system prompt do usuário (`user.settings.ui.system` em
+`/home/fabio/services/open-webui/data/webui.db`, editável via
+`docker exec -u 0 open-webui`; backup antes, F5 depois — o localStorage da
+aba sobrescreve). Antes de culpar o pipeline por uma chamada que não devia
+ter existido — ou por uma que não existiu —, verifique no cliente se a
+chamada ocorreu e o que o prompt manda.
+
+Duas falhas medidas ali, nenhuma delas do pipeline: 11/09/2026, sem âncora de
+data nem seção de pesquisa, uma pergunta sobre hoje foi respondida de memória
+com data inventada e zero chamadas; 12/09/2026, com a seção de pesquisa mas
+sem portão de tarefa, "revise este texto" disparou `research_web` porque o
+texto continha um termo verificável. Uma regra de pesquisa que só olha para
+"eu sei este fato?" não distingue **tarefa sobre o texto já colado** (revisar,
+reescrever, traduzir, resumir) de **pergunta por fato externo**; a primeira
+nunca precisa de ferramenta. A distinção é estrutural (de onde vem o
+material), não do assunto do texto.
