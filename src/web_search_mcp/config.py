@@ -31,8 +31,19 @@ logging.basicConfig(
 MODEL = os.getenv("MODEL") or ""
 MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "http://localhost:8200/v1")
 MODEL_API_KEY = os.getenv("MODEL_API_KEY", "not-needed")
+# Prazo TOTAL de cada chamada de LLM, em segundos. A chamada é feita em
+# streaming para que estourar o prazo feche a conexão e o servidor pare de
+# gerar. Medido em 07/10/2026 no router do llama.cpp: sem streaming, o cliente
+# desistia aos 120 s e o servidor seguia gerando (175 mil tokens, 19 min); com
+# `parallel = 1` tudo o que veio depois ficou na fila atrás dela.
 MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", "120"))
 MODEL_TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0"))
+
+# Teto de tokens gerados por chamada (raciocínio incluso). É fusível, não
+# calibragem: o resumo mede ~700 tokens. Quem para uma geração em loop é o
+# prazo acima; isto limita o estrago em provider que não cancela ao fechar a
+# conexão. 0 = não envia max_tokens.
+MODEL_MAX_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", "4096"))
 
 # Janela de contexto do modelo, em tokens. Precisa bater com o que o servidor
 # subiu (--ctx-size), porque é daqui que sai o orçamento do dossiê: estourar
@@ -82,6 +93,14 @@ if _reasoning_body_raw:
         raise ValueError(f"REASONING_BODY não é JSON válido: {e}") from e
 else:
     REASONING_BODY = {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "low"}}
+
+# Temperatura das chamadas com raciocínio ligado. Separada da
+# MODEL_TEMPERATURE porque decodificação gulosa (0) com raciocínio pode entrar
+# em repetição sem fim: em 07/10/2026 a triagem de uma pesquisa no qwen3.6:35B
+# gerou 175 mil tokens para devolver até 12 números. A recomendação da Qwen
+# para o modo de raciocínio é 0.6. Vazio = usa a MODEL_TEMPERATURE.
+_reasoning_temperature_raw = os.getenv("REASONING_TEMPERATURE", "0.6").strip()
+REASONING_TEMPERATURE = float(_reasoning_temperature_raw) if _reasoning_temperature_raw else None
 
 # EXTRA_SYSTEM_PROMPT: texto apenso ao final do system prompt em toda chamada.
 # Não cabe em EXTRA_BODY porque não é payload da API, é conteúdo de mensagem

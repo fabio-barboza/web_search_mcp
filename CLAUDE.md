@@ -306,7 +306,15 @@ however small; `research_web`'s budgeted pipeline needs to reject short
 pages so the slot passes to the next pooled candidate.
 
 `llm.py` talks to any OpenAI-compatible `/chat/completions` endpoint via
-plain `requests` (no SDK). `_resolve_model` re-queries `GET /models` on
+plain `requests` (no SDK). `chat()` always streams and enforces
+`MODEL_TIMEOUT` as a TOTAL deadline, closing the connection when it
+expires: measured 07/10/2026 on the llama.cpp router, a non-streamed call
+abandoned at the client timeout kept generating server-side (175k tokens,
+19 min) and, with `parallel = 1`, blocked every later call; closing a
+streamed one stops generation at once. Calls that reason use
+`REASONING_TEMPERATURE` (0.6), not `MODEL_TEMPERATURE` (0): greedy decoding
+with reasoning is what looped. `MODEL_MAX_TOKENS` is only a fuse. Each call
+logs one `chat:` line (reasoning chars, answer chars, seconds). `_resolve_model` re-queries `GET /models` on
 every call (no caching) when `MODEL` is unset in config, adopting whatever
 model the server already has loaded — this avoids fighting another client
 (e.g. a webui) for the model slot and forcing reloads. Only picks up a

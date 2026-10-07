@@ -1,6 +1,8 @@
 """Chamada de chat completion numa API compatível com OpenAI, via `requests`."""
 
+import json
 import logging
+import time
 
 import requests
 
@@ -125,38 +127,104 @@ def chat(system: str, user: str, temperature: float | None = None, reasoning: bo
 
     reasoning=True aplica config.REASONING_BODY por cima do EXTRA_BODY quando
     USE_REASONING está ligado: pedido só pelas chamadas que decidem a
-    qualidade da resposta (ver config).
+    qualidade da resposta (ver config). Essas chamadas usam
+    config.REASONING_TEMPERATURE, a não ser que temperature venha explícita.
+
+    A resposta é lida em streaming e a chamada inteira tem prazo de
+    config.MODEL_TIMEOUT: estourou, a conexão é fechada (o que cancela a
+    geração no servidor) e sobe requests.Timeout.
     """
     model = _resolve_model()
     if config.EXTRA_SYSTEM_PROMPT:
         system = f"{system}\n\n{config.EXTRA_SYSTEM_PROMPT}"
+    thinking = bool(reasoning and config.USE_REASONING and config.REASONING_BODY)
+    if temperature is None:
+        temperature = config.MODEL_TEMPERATURE
+        if thinking and config.REASONING_TEMPERATURE is not None:
+            temperature = config.REASONING_TEMPERATURE
     payload = {
         "model": model,
-        "temperature": temperature if temperature is not None else config.MODEL_TEMPERATURE,
+        "temperature": temperature,
+        "stream": True,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
     }
+    if config.MODEL_MAX_TOKENS > 0:
+        payload["max_tokens"] = config.MODEL_MAX_TOKENS
     if config.EXTRA_BODY:
         payload.update(config.EXTRA_BODY)
-    if reasoning and config.USE_REASONING and config.REASONING_BODY:
+    if thinking:
         payload.update(config.REASONING_BODY)
+    prompt_chars = len(system) + len(user)
+    started = time.monotonic()
     try:
-        r = requests.post(
+        with requests.post(
             f"{config.MODEL_BASE_URL}/chat/completions",
             json=payload,
             headers={"Authorization": f"Bearer {config.MODEL_API_KEY}"},
             timeout=config.MODEL_TIMEOUT,
-        )
-        r.raise_for_status()
+            stream=True,
+        ) as r:
+            if not r.ok:
+                r.content  # carrega o corpo antes de a conexão fechar: o log do erro precisa dele
+            r.raise_for_status()
+            content, reasoning_chars, finish = _read_stream(r, started + config.MODEL_TIMEOUT)
     except requests.RequestException as e:
         # O corpo diz o que o status esconde ("context length exceeded", nome
         # de modelo errado, param recusado). Sem ele um 400 é indepurável.
         body = getattr(e.response, "text", "")[:500] if e.response is not None else ""
         logger.error(
-            "chat: falha ao chamar %s (model=%s, prompt=%d chars): %s %s",
-            config.MODEL_BASE_URL, model, len(system) + len(user), e, body,
+            "chat: falha ao chamar %s (model=%s, prompt=%d chars, %.1fs): %s %s",
+            config.MODEL_BASE_URL, model, prompt_chars, time.monotonic() - started, e, body,
         )
         raise
-    return r.json()["choices"][0]["message"]["content"]
+    # Uma linha por chamada: é daqui que sai onde o tempo da pesquisa vai
+    # (raciocínio x resposta) na hora de calibrar por modelo.
+    logger.info(
+        "chat: model=%s raciocínio=%s temp=%s prompt=%d chars, pensou=%d chars, resposta=%d chars, "
+        "fim=%s, %.1fs",
+        model, thinking, temperature, prompt_chars, reasoning_chars, len(content), finish,
+        time.monotonic() - started,
+    )
+    if finish == "length":
+        logger.error(
+            "chat: geração cortada no teto de %d tokens (model=%s, pensou=%d chars, resposta=%d chars)",
+            config.MODEL_MAX_TOKENS, model, reasoning_chars, len(content),
+        )
+    return content
+
+
+def _read_stream(r: requests.Response, deadline: float) -> tuple[str, int, str | None]:
+    """Junta os deltas do SSE. Devolve (conteúdo, chars de raciocínio, finish_reason).
+
+    O timeout do requests vale por leitura do socket, não pela resposta toda:
+    um modelo em loop manda um token atrás do outro e nunca o dispara. Por
+    isso o prazo total é conferido aqui, a cada evento.
+    """
+    if "text/event-stream" not in r.headers.get("Content-Type", ""):
+        # Provider que ignora "stream": resposta inteira num JSON só.
+        choice = r.json()["choices"][0]
+        message = choice["message"]
+        return message.get("content") or "", len(message.get("reasoning_content") or ""), choice.get("finish_reason")
+    parts: list[str] = []
+    reasoning_chars = 0
+    finish = None
+    for raw in r.iter_lines():
+        if time.monotonic() > deadline:
+            raise requests.Timeout(f"prazo total de {config.MODEL_TIMEOUT}s estourado no meio da geração")
+        if not raw.startswith(b"data:"):
+            continue
+        data = raw[5:].strip()
+        if data == b"[DONE]":
+            break
+        choices = json.loads(data).get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        if delta.get("content"):
+            parts.append(delta["content"])
+        reasoning_chars += len(delta.get("reasoning_content") or "")
+        finish = choices[0].get("finish_reason") or finish
+    return "".join(parts), reasoning_chars, finish

@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,9 +8,27 @@ from web_search_mcp import config
 from web_search_mcp import llm
 
 
-def _mock_response(content="ok"):
+def _sse(*events):
+    lines = [b"data: " + json.dumps(e).encode() for e in events]
+    return lines + [b"data: [DONE]"]
+
+
+def _delta(content=None, reasoning=None, finish=None):
+    delta = {}
+    if content is not None:
+        delta["content"] = content
+    if reasoning is not None:
+        delta["reasoning_content"] = reasoning
+    return {"choices": [{"delta": delta, "finish_reason": finish}]}
+
+
+def _mock_response(content="ok", lines=None):
+    """Resposta em streaming (SSE), como o chat() pede."""
     resp = MagicMock()
-    resp.json.return_value = {"choices": [{"message": {"content": content}}]}
+    resp.__enter__.return_value = resp
+    resp.ok = True
+    resp.headers = {"Content-Type": "text/event-stream"}
+    resp.iter_lines.return_value = lines if lines is not None else _sse(_delta(content), _delta(finish="stop"))
     resp.raise_for_status.return_value = None
     return resp
 
@@ -54,12 +73,90 @@ class TestChat:
         assert post.call_args.kwargs["json"]["temperature"] == config.MODEL_TEMPERATURE
 
     def test_http_error_propagates(self):
-        resp = MagicMock()
+        resp = _mock_response()
+        resp.ok = False
         resp.raise_for_status.side_effect = requests.HTTPError("500 error")
         with patch.object(llm, "_resolve_model", return_value="my-model"), \
              patch("web_search_mcp.llm.requests.post", return_value=resp):
             with pytest.raises(requests.HTTPError):
                 llm.chat(system="sys", user="usr")
+
+
+class TestChatStream:
+    def _chat(self, resp, **kwargs):
+        with patch.object(llm, "_resolve_model", return_value="my-model"), \
+             patch("web_search_mcp.llm.requests.post", return_value=resp) as post:
+            return llm.chat(system="sys", user="usr", **kwargs), post
+
+    def test_asks_for_stream_and_joins_deltas(self):
+        resp = _mock_response(lines=_sse(_delta("um "), _delta("dois"), _delta(finish="stop")))
+        result, post = self._chat(resp)
+        assert result == "um dois"
+        assert post.call_args.kwargs["stream"] is True
+        assert post.call_args.kwargs["json"]["stream"] is True
+
+    def test_reasoning_deltas_stay_out_of_the_answer(self):
+        resp = _mock_response(lines=_sse(_delta(reasoning="pensando..."), _delta("3\n1"), _delta(finish="stop")))
+        result, _ = self._chat(resp)
+        assert result == "3\n1"
+
+    def test_total_deadline_aborts_a_generation_that_never_ends(self):
+        # O caso de 07/10/2026: o modelo em loop manda token atrás de token,
+        # então o timeout de leitura nunca dispara. Quem corta é o prazo total.
+        def endless():
+            while True:
+                yield b"data: " + json.dumps(_delta("x")).encode()
+
+        resp = _mock_response()
+        resp.iter_lines.return_value = endless()
+        clock = iter([0.0] + [float(n) for n in range(1, 10_000)])
+        with patch.object(config, "MODEL_TIMEOUT", 5), \
+             patch("web_search_mcp.llm.time.monotonic", side_effect=lambda: next(clock)):
+            with pytest.raises(requests.Timeout):
+                self._chat(resp)
+        resp.__exit__.assert_called_once()
+
+    def test_max_tokens_sent_by_default_and_omitted_when_zero(self):
+        with patch.object(config, "MODEL_MAX_TOKENS", 4096):
+            _, post = self._chat(_mock_response())
+        assert post.call_args.kwargs["json"]["max_tokens"] == 4096
+        with patch.object(config, "MODEL_MAX_TOKENS", 0):
+            _, post = self._chat(_mock_response())
+        assert "max_tokens" not in post.call_args.kwargs["json"]
+
+    def test_non_stream_json_response_still_works(self):
+        resp = _mock_response()
+        resp.headers = {"Content-Type": "application/json"}
+        resp.json.return_value = {"choices": [{"message": {"content": "inteira"}, "finish_reason": "stop"}]}
+        result, _ = self._chat(resp)
+        assert result == "inteira"
+
+
+class TestReasoningTemperature:
+    def _temperature(self, **kwargs):
+        with patch.object(config, "MODEL_TEMPERATURE", 0.0), \
+             patch.object(config, "REASONING_TEMPERATURE", 0.6), \
+             patch.object(config, "REASONING_BODY", {"chat_template_kwargs": {"enable_thinking": True}}), \
+             patch.object(llm, "_resolve_model", return_value="my-model"), \
+             patch("web_search_mcp.llm.requests.post", return_value=_mock_response()) as post:
+            llm.chat(system="sys", user="usr", **kwargs)
+        return post.call_args.kwargs["json"]["temperature"]
+
+    def test_reasoning_call_uses_its_own_temperature(self):
+        with patch.object(config, "USE_REASONING", True):
+            assert self._temperature(reasoning=True) == 0.6
+
+    def test_plain_call_keeps_model_temperature(self):
+        with patch.object(config, "USE_REASONING", True):
+            assert self._temperature() == 0.0
+
+    def test_reasoning_off_keeps_model_temperature(self):
+        with patch.object(config, "USE_REASONING", False):
+            assert self._temperature(reasoning=True) == 0.0
+
+    def test_explicit_temperature_wins(self):
+        with patch.object(config, "USE_REASONING", True):
+            assert self._temperature(reasoning=True, temperature=0.2) == 0.2
 
 
 class TestResolveModel:
