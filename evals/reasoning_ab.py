@@ -17,9 +17,11 @@ Fases:
    a diferença medida é da configuração, não do estado da web entre braços.
 2. Braços — por pergunta mede triagem+leitura e resumo, separados, porque o
    raciocínio custa nas duas e a calibragem pode querer ligar só uma.
-3. Julgamento — juiz fixo (sem raciocínio, temperatura 0) para todos os
-   braços. O juiz é o mesmo modelo que escreveu: a nota absoluta é otimista,
-   a comparação entre braços vale. Os resumos ficam no JSON para nota cega.
+3. Julgamento — juiz fixo (temperatura 0) para todos os braços:
+   EVAL_JUDGE_MODEL em EVAL_JUDGE_BASE_URL/EVAL_JUDGE_API_KEY. Sem eles o
+   juiz é o próprio modelo avaliado, que tende a se dar razão: aí a nota
+   absoluta é otimista e só a comparação entre braços vale. Os resumos ficam
+   no JSON para nota cega.
 
 Com mais de uma rodada a ordem dos braços alterna, para o cache de prompt do
 servidor não favorecer sempre o mesmo.
@@ -30,6 +32,7 @@ import logging
 import statistics
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -69,9 +72,38 @@ def _arm(name: str):
         yield
 
 
+# Teto de saída do juiz: modelo de API que raciocina gasta bem mais que os
+# 4096 do fusível local antes de responder uma palavra.
+_JUDGE_MAX_TOKENS = 16384
+# Julgamentos em paralelo quando o juiz está em outro servidor. No mesmo
+# servidor dos braços (uma GPU, parallel = 1) paralelismo só enfileira.
+_JUDGE_WORKERS = 6
+
+
+def _remote_judge() -> bool:
+    return config.EVAL_JUDGE_BASE_URL != config.MODEL_BASE_URL
+
+
 @contextmanager
-def _judge_config():
-    with patch.object(config, "USE_REASONING", False), patch.object(config, "MODEL_TEMPERATURE", 0.0):
+def _judge_config(model: str):
+    """Juiz fixo para todos os braços: sem raciocínio pedido, temperatura 0.
+
+    EXTRA_BODY e EXTRA_SYSTEM_PROMPT são do modelo avaliado (ex.
+    chat_template_kwargs do Qwen) e não valem para um juiz de outro provider.
+    """
+    with ExitStack() as stack:
+        for name, value in (
+            ("MODEL", config.EVAL_JUDGE_MODEL or model),
+            ("MODEL_BASE_URL", config.EVAL_JUDGE_BASE_URL),
+            ("MODEL_API_KEY", config.EVAL_JUDGE_API_KEY),
+            ("USE_REASONING", False),
+            ("MODEL_TEMPERATURE", 0.0),
+        ):
+            stack.enter_context(patch.object(config, name, value))
+        if _remote_judge():
+            stack.enter_context(patch.object(config, "EXTRA_BODY", {}))
+            stack.enter_context(patch.object(config, "EXTRA_SYSTEM_PROMPT", ""))
+            stack.enter_context(patch.object(config, "MODEL_MAX_TOKENS", _JUDGE_MAX_TOKENS))
         yield
 
 
@@ -144,18 +176,24 @@ def _run_arm(name: str, items: list[dict], log: _ChatLog) -> list[dict]:
     return rows
 
 
-def _judge(runs: list[dict]) -> None:
-    with _judge_config():
-        for run in runs:
-            for row in run["rows"]:
-                if "erro" in row or not row["summary"]:
-                    continue
-                faith, sup, tot = faithfulness(row["summary"], row["dossier"], max_claims=_MAX_CLAIMS)
-                row["faithfulness"] = faith
-                row["claims"] = f"{sup}/{tot}"
-                row["relevance"] = relevance(row["query"], row["summary"])
-                print(f"   juiz [{run['arm']} r{run['round']}] {row['query'][:40]:<40} "
-                      f"faith {faith:.2f} ({row['claims']}) rel {row['relevance']}", flush=True)
+def _judge_row(job: tuple[dict, dict]) -> None:
+    run, row = job
+    faith, sup, tot = faithfulness(row["summary"], row["dossier"], max_claims=_MAX_CLAIMS)
+    row["faithfulness"] = faith
+    row["claims"] = f"{sup}/{tot}"
+    row["relevance"] = relevance(row["query"], row["summary"])
+    print(f"   juiz [{run['arm']} r{run['round']}] {row['query'][:40]:<40} "
+          f"faith {faith:.2f} ({row['claims']}) rel {row['relevance']}", flush=True)
+
+
+def _judge(runs: list[dict], model: str) -> str:
+    jobs = [(run, row) for run in runs for row in run["rows"] if row.get("summary")]
+    with _judge_config(model):
+        judge = config.MODEL
+        print(f"juiz: {judge} em {config.MODEL_BASE_URL}", flush=True)
+        with ThreadPoolExecutor(_JUDGE_WORKERS if _remote_judge() else 1) as pool:
+            list(pool.map(_judge_row, jobs))
+    return judge
 
 
 def _table(runs: list[dict], arms: list[str]) -> None:
@@ -217,13 +255,13 @@ def main() -> None:
                 print(f"\n== rodada {rnd}, braço {name}", flush=True)
                 runs.append({"arm": name, "round": rnd, "rows": _run_arm(name, items, log)})
         print("\n== julgamento", flush=True)
-        _judge(runs)
+        judge = _judge(runs, model)
 
     _table(runs, arms)
 
     _RESULTS_DIR.mkdir(exist_ok=True)
     out = _RESULTS_DIR / f"reasoning_ab__{model.replace(':', '_')}__{datetime.now():%Y%m%d_%H%M%S}.json"
-    out.write_text(json.dumps({"model": model, "rounds": rounds, "runs": runs}, ensure_ascii=False, indent=2))
+    out.write_text(json.dumps({"model": model, "judge": judge, "rounds": rounds, "runs": runs}, ensure_ascii=False, indent=2))
     print(f"\nSalvo em {out}")
 
 

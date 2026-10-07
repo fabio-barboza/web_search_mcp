@@ -242,3 +242,8 @@ if os.getenv("TZ"):
 # --- Eval ---
 
 EVAL_JUDGE_MODEL = os.getenv("EVAL_JUDGE_MODEL") or MODEL
+# Juiz em outro servidor (ex. um modelo de API atrás de um LiteLLM): juiz que
+# não é o modelo avaliado não se dá razão, e não disputa a GPU com os braços.
+# Vazio = mesmo servidor e mesma chave do MODEL.
+EVAL_JUDGE_BASE_URL = os.getenv("EVAL_JUDGE_BASE_URL") or MODEL_BASE_URL
+EVAL_JUDGE_API_KEY = os.getenv("EVAL_JUDGE_API_KEY") or MODEL_API_KEY
