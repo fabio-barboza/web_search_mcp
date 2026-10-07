@@ -130,6 +130,7 @@ uv run --group test pytest           # full test suite (deterministic, mocks net
 uv run --group test pytest tests/test_research.py::test_name  # single test
 
 uv run python -m evals.run           # eval against real web + real LLM, not CI — see evals/
+uv run python -m evals.reasoning_ab 2  # reasoning off / temp 0.6 / temp 0 on the loaded model, 2 rounds
 ```
 
 Tests need no SearXNG/LLM running. Evals and manual server runs do.
