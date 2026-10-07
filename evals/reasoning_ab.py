@@ -2,14 +2,16 @@
 
 Uso:
     uv run python -m evals.reasoning_ab [rodadas] [braço ...]
-    (padrão: 1 rodada, braços "sem" "t0.6" "t0"; modelo = config.MODEL ou o
+    (padrão: 1 rodada, braços "sem", os quatro "bN" e "t0.6"; modelo = config.MODEL ou o
     que estiver carregado no servidor)
 
 Braços:
     sem    nenhuma chamada raciocina (USE_REASONING=false)
-    t0.6   raciocínio na triagem e no resumo, temperatura 0.6
+    t0.6   raciocínio sem teto na triagem e no resumo, temperatura 0.6
     t0     raciocínio com temperatura 0, o que rodava até 07/10/2026 e entrou
            em loop no qwen3.6:35B; aqui o prazo do chat() corta se repetir
+    bN     raciocínio a 0.6 com teto de N tokens (b256, b512, b1024, b2048),
+           para modelo cujo template não tem nível de esforço
 
 Fases:
 1. Links — uma busca por pergunta, feita UMA vez. Todos os braços fazem a
@@ -55,20 +57,42 @@ from evals.questions import QUESTIONS
 _RESULTS_DIR = Path(__file__).parent / "results"
 _MAX_CLAIMS = 8
 
-# use_reasoning, temperatura das chamadas com raciocínio
+_THINK = {"chat_template_kwargs": {"enable_thinking": True}}
+
+
+def _budget(tokens: int) -> dict:
+    """Raciocínio com teto de tokens imposto pelo llama.cpp, por pedido.
+
+    Medido em 07/10/2026 no qwen3.6:35B: o chat template só tem
+    enable_thinking, então reasoning_effort (kwarg ou campo de topo) não muda
+    nada (7 mil chars de raciocínio com ou sem "low"); reasoning_budget_tokens
+    corta de verdade (200 -> 543 chars e a resposta sai).
+    """
+    return {**_THINK, "reasoning_budget_tokens": tokens}
+
+
+# use_reasoning, temperatura das chamadas com raciocínio, REASONING_BODY
+# (None = o do config)
 _ARMS = {
-    "sem": (False, None),
-    "t0.6": (True, 0.6),
-    "t0": (True, 0.0),
+    "sem": (False, None, None),
+    "t0.6": (True, 0.6, None),
+    "t0": (True, 0.0, None),
+    "b256": (True, 0.6, _budget(256)),
+    "b512": (True, 0.6, _budget(512)),
+    "b1024": (True, 0.6, _budget(1024)),
+    "b2048": (True, 0.6, _budget(2048)),
 }
+_DEFAULT_ARMS = ["sem", "b256", "b512", "b1024", "b2048", "t0.6"]
 
 
 @contextmanager
 def _arm(name: str):
-    use_reasoning, temperature = _ARMS[name]
+    use_reasoning, temperature, body = _ARMS[name]
     with ExitStack() as stack:
         stack.enter_context(patch.object(config, "USE_REASONING", use_reasoning))
         stack.enter_context(patch.object(config, "REASONING_TEMPERATURE", temperature))
+        if body is not None:
+            stack.enter_context(patch.object(config, "REASONING_BODY", body))
         yield
 
 
@@ -91,6 +115,8 @@ def _judge_config(model: str):
     EXTRA_BODY e EXTRA_SYSTEM_PROMPT são do modelo avaliado (ex.
     chat_template_kwargs do Qwen) e não valem para um juiz de outro provider.
     """
+    # Antes dos patches: depois deles MODEL_BASE_URL já é a do juiz.
+    remote = _remote_judge()
     with ExitStack() as stack:
         for name, value in (
             ("MODEL", config.EVAL_JUDGE_MODEL or model),
@@ -100,7 +126,7 @@ def _judge_config(model: str):
             ("MODEL_TEMPERATURE", 0.0),
         ):
             stack.enter_context(patch.object(config, name, value))
-        if _remote_judge():
+        if remote:
             stack.enter_context(patch.object(config, "EXTRA_BODY", {}))
             stack.enter_context(patch.object(config, "EXTRA_SYSTEM_PROMPT", ""))
             stack.enter_context(patch.object(config, "MODEL_MAX_TOKENS", _JUDGE_MAX_TOKENS))
@@ -188,10 +214,11 @@ def _judge_row(job: tuple[dict, dict]) -> None:
 
 def _judge(runs: list[dict], model: str) -> str:
     jobs = [(run, row) for run in runs for row in run["rows"] if row.get("summary")]
+    workers = _JUDGE_WORKERS if _remote_judge() else 1
     with _judge_config(model):
         judge = config.MODEL
         print(f"juiz: {judge} em {config.MODEL_BASE_URL}", flush=True)
-        with ThreadPoolExecutor(_JUDGE_WORKERS if _remote_judge() else 1) as pool:
+        with ThreadPoolExecutor(workers) as pool:
             list(pool.map(_judge_row, jobs))
     return judge
 
@@ -225,7 +252,7 @@ def _table(runs: list[dict], arms: list[str]) -> None:
 def main() -> None:
     args = sys.argv[1:]
     rounds = int(args.pop(0)) if args and args[0].isdigit() else 1
-    arms = args or list(_ARMS)
+    arms = args or _DEFAULT_ARMS
     unknown = [a for a in arms if a not in _ARMS]
     if unknown:
         sys.exit(f"braço desconhecido: {unknown}; opções: {list(_ARMS)}")

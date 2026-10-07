@@ -40,10 +40,13 @@ MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", "120"))
 MODEL_TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0"))
 
 # Teto de tokens gerados por chamada (raciocínio incluso). É fusível, não
-# calibragem: o resumo mede ~700 tokens. Quem para uma geração em loop é o
-# prazo acima; isto limita o estrago em provider que não cancela ao fechar a
-# conexão. 0 = não envia max_tokens.
-MODEL_MAX_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", "4096"))
+# calibragem: quem para uma geração em loop é o prazo acima; isto limita o
+# estrago em provider que não cancela ao fechar a conexão. Precisa ficar bem
+# acima do que o modelo pensa: medido em 07/10/2026, o qwen3.6:35B com
+# raciocínio sem teto passou de 4096 tokens em 27 de 49 chamadas, e 21 delas
+# voltaram com resposta vazia. Para limitar o raciocínio, use o orçamento do
+# servidor no REASONING_BODY, não este teto. 0 = não envia max_tokens.
+MODEL_MAX_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", "16384"))
 
 # Janela de contexto do modelo, em tokens. Precisa bater com o que o servidor
 # subiu (--ctx-size), porque é daqui que sai o orçamento do dossiê: estourar
@@ -84,6 +87,11 @@ else:
 # template do Qwen3.x servido pelo llama.cpp (o medido acima). Outro modelo
 # pede outra chave — ex. um que só aceite enable_thinking:
 # REASONING_BODY={"chat_template_kwargs": {"enable_thinking": true}}
+# Template sem nível de esforço ignora reasoning_effort: medido em 07/10/2026,
+# o qwen3.6:35B pensa o mesmo com ou sem "low" (o template só tem
+# enable_thinking). Nesse caso o teto é do servidor, em tokens, por pedido
+# (llama.cpp):
+# REASONING_BODY={"chat_template_kwargs": {"enable_thinking": true}, "reasoning_budget_tokens": 512}
 USE_REASONING = os.getenv("USE_REASONING", "false").strip().lower() in ("1", "true", "yes", "on")
 _reasoning_body_raw = os.getenv("REASONING_BODY", "").strip()
 if _reasoning_body_raw:
