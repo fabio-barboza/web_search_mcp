@@ -12,6 +12,7 @@ Braços:
            em loop no qwen3.6:35B; aqui o prazo do chat() corta se repetir
     bN     raciocínio a 0.6 com teto de N tokens (b256, b512, b1024, b2048),
            para modelo cujo template não tem nível de esforço
+    b256pp, b256card   teto 256 com o sampler do card do modelo (ver _ARMS)
 
 Fases:
 1. Links — uma busca por pergunta, feita UMA vez. Todos os braços fazem a
@@ -71,6 +72,8 @@ def _budget(tokens: int) -> dict:
     return {**_THINK, "reasoning_budget_tokens": tokens}
 
 
+_CARD_SAMPLER = {"top_p": 0.95, "top_k": 20, "presence_penalty": 1.5}
+
 # use_reasoning, temperatura das chamadas com raciocínio, REASONING_BODY
 # (None = o do config)
 _ARMS = {
@@ -81,6 +84,12 @@ _ARMS = {
     "b512": (True, 0.6, _budget(512)),
     "b1024": (True, 0.6, _budget(1024)),
     "b2048": (True, 0.6, _budget(2048)),
+    # Sampler do card do Qwen3.6 nas chamadas com raciocínio, com teto 256:
+    # o serviço só manda temperatura, e o modelo entrou em repetição duas
+    # vezes. "pp" mantém 0.6 e soma o resto; "card" é o conjunto "thinking,
+    # general tasks" inteiro (temperatura 1.0).
+    "b256pp": (True, 0.6, {**_budget(256), **_CARD_SAMPLER}),
+    "b256card": (True, 1.0, {**_budget(256), **_CARD_SAMPLER}),
 }
 _DEFAULT_ARMS = ["sem", "b256", "b512", "b1024", "b2048", "t0.6"]
 
