@@ -222,7 +222,9 @@ def _run_arm(name: str, items: list[dict], log: _ChatLog) -> list[dict]:
 def _judge_row(job: tuple[dict, dict]) -> None:
     run, row = job
     faith, sup, tot = faithfulness(row["summary"], row["dossier"], max_claims=_MAX_CLAIMS)
-    row["faithfulness"] = faith
+    # 0 julgadas = o juiz falhou (timeout), não nota zero: fica fora da média.
+    if tot:
+        row["faithfulness"] = faith
     row["claims"] = f"{sup}/{tot}"
     row["relevance"] = relevance(row["query"], row["summary"])
     print(f"   juiz [{run['arm']} r{run['round']}] {row['query'][:40]:<40} "
