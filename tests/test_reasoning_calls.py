@@ -9,6 +9,10 @@ LOW = {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "lo
 
 def _post():
     resp = MagicMock()
+    # chat() pede streaming; resposta inteira em JSON é o caminho do provider
+    # que ignora o pedido.
+    resp.__enter__.return_value = resp
+    resp.headers = {"Content-Type": "application/json"}
     resp.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
     resp.raise_for_status.return_value = None
     return patch("web_search_mcp.llm.requests.post", return_value=resp)

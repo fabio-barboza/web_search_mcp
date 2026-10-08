@@ -8,14 +8,6 @@ from web_search_mcp import config
 from web_search_mcp import llm
 
 
-@pytest.fixture(autouse=True)
-def _no_host_model_settings():
-    # models.toml e REASONING_BUDGET_TOKENS vêm do host; cada teste que
-    # precisa deles define os seus.
-    with patch.object(config, "MODEL_SETTINGS", {}), patch.object(config, "REASONING_BUDGET_TOKENS", 0):
-        yield
-
-
 def _sse(*events):
     lines = [b"data: " + json.dumps(e).encode() for e in events]
     return lines + [b"data: [DONE]"]
