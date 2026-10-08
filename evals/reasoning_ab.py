@@ -13,6 +13,9 @@ Braços:
     bN     raciocínio a 0.6 com teto de N tokens (b256, b512, b1024, b2048),
            para modelo cujo template não tem nível de esforço
     b256pp, b256card   teto 256 com o sampler do card do modelo (ver _ARMS)
+    low, low256        esforço "low" pelo template, sem teto e com teto 256, para
+                       modelo cujo template tem nível de esforço; "low" é o
+                       mesmo pedido de t0.6 (que no qwen3.6 sai sem teto)
 
 Fases:
 1. Links — uma busca por pergunta, feita UMA vez. Todos os braços fazem a
@@ -59,6 +62,10 @@ _RESULTS_DIR = Path(__file__).parent / "results"
 _MAX_CLAIMS = 8
 
 _THINK = {"chat_template_kwargs": {"enable_thinking": True}}
+# Nível de esforço pelo chat template. Lido direto dos GGUF em 07/10/2026: o
+# do qwen3.8:27B tem reasoning_effort (padrão xhigh quando nada é pedido), o
+# do qwen3.6:35B não tem e ignora a chave.
+_LOW = {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "low"}}
 
 
 def _budget(tokens: int) -> dict:
@@ -75,11 +82,12 @@ def _budget(tokens: int) -> dict:
 _CARD_SAMPLER = {"top_p": 0.95, "top_k": 20, "presence_penalty": 1.5}
 
 # use_reasoning, temperatura das chamadas com raciocínio, REASONING_BODY
-# (None = o do config)
 _ARMS = {
     "sem": (False, None, None),
-    "t0.6": (True, 0.6, None),
-    "t0": (True, 0.0, None),
+    "t0.6": (True, 0.6, _LOW),
+    "t0": (True, 0.0, _LOW),
+    "low": (True, 0.6, _LOW),
+    "low256": (True, 0.6, {**_LOW, "reasoning_budget_tokens": 256}),
     "b256": (True, 0.6, _budget(256)),
     "b512": (True, 0.6, _budget(512)),
     "b1024": (True, 0.6, _budget(1024)),
