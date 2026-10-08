@@ -130,6 +130,7 @@ uv run --group test pytest           # full test suite (deterministic, mocks net
 uv run --group test pytest tests/test_research.py::test_name  # single test
 
 uv run python -m evals.run           # eval against real web + real LLM, not CI — see evals/
+uv run python -m evals.reasoning_ab 2  # reasoning off / temp 0.6 / temp 0 on the loaded model, 2 rounds
 ```
 
 Tests need no SearXNG/LLM running. Evals and manual server runs do.
@@ -306,7 +307,25 @@ however small; `research_web`'s budgeted pipeline needs to reject short
 pages so the slot passes to the next pooled candidate.
 
 `llm.py` talks to any OpenAI-compatible `/chat/completions` endpoint via
-plain `requests` (no SDK). `_resolve_model` re-queries `GET /models` on
+plain `requests` (no SDK). `chat()` always streams and enforces
+`MODEL_TIMEOUT` as a TOTAL deadline, closing the connection when it
+expires: measured 07/10/2026 on the llama.cpp router, a non-streamed call
+abandoned at the client timeout kept generating server-side (175k tokens,
+19 min) and, with `parallel = 1`, blocked every later call; closing a
+streamed one stops generation at once. Calls that reason use
+`REASONING_TEMPERATURE` (0.6), not `MODEL_TEMPERATURE` (0): greedy decoding
+with reasoning is what looped. Reasoning settings are per model:
+`llm._reasoning_settings` reads the model's table in `MODELS_FILE`
+(`models.toml`, see `models.example.toml`) over `[default]` over the env
+vars, because the best setting differs (a 256-token budget on qwen3.6,
+`low` effort on qwen3.8) and the MCP adopts whichever model is loaded.
+`REASONING_BUDGET_TOKENS` (2048) is the default reasoning ceiling. `MODEL_MAX_TOKENS` is only a fuse. Neither
+temperature nor the fuse prevents a repetition loop (the same summary line
+432 times at temperature 0.6, 84 s): `_LoopDetector` watches the stream and
+cuts when a block of lines repeats 4 times in a row — in the answer it
+returns the text before the cycle, in the reasoning it raises
+`GenerationLoop`. Each call
+logs one `chat:` line (reasoning chars, answer chars, seconds). `_resolve_model` re-queries `GET /models` on
 every call (no caching) when `MODEL` is unset in config, adopting whatever
 model the server already has loaded — this avoids fighting another client
 (e.g. a webui) for the model slot and forcing reloads. Only picks up a

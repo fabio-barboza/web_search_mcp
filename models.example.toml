@@ -1,0 +1,44 @@
+# Ajuste de raciocínio por modelo. Copie para models.toml (ou aponte MODELS_FILE
+# para outro caminho) e deixe aqui só os modelos que você usa.
+#
+# O MCP usa o modelo que estiver carregado no servidor e procura a tabela com o
+# id dele, como aparece em GET /models (maiúsculas e minúsculas tanto faz).
+# Modelo sem tabela própria usa o [default]. O que uma tabela não define vem do
+# [default], e o que ele não define vem das variáveis do .env.
+#
+# Chaves:
+#   reasoning                 true liga o raciocínio na triagem, no resumo e no
+#                             analyze_urls; as chamadas curtas nunca raciocinam
+#   body                      o que vai no pedido para ligar o raciocínio NESTE
+#                             modelo (cada um pede uma chave diferente)
+#   reasoning_budget_tokens   teto de tokens de raciocínio por chamada, imposto
+#                             pelo llama.cpp; 0 = não envia
+#   temperature               temperatura das chamadas que raciocinam
+#
+# Cada modelo precisa de calibragem própria: o mesmo ajuste que acelera um
+# estraga outro. As tabelas abaixo foram medidas em 07/10/2026 com
+# `uv run python -m evals.reasoning_ab` (6 perguntas x 2 rodadas, nota cega de
+# 0 a 10; o tempo é só o do modelo, sem a busca).
+
+[default]
+# Sem raciocínio: a única configuração que funciona igual em qualquer modelo e
+# provider. Ligue por modelo, depois de medir.
+reasoning = false
+reasoning_budget_tokens = 2048
+
+# O chat template só tem enable_thinking: reasoning_effort é ignorado e, sem
+# teto, o modelo pensa ~7 mil tokens por pesquisa.
+#   sem raciocínio 7,5 em 11 s | teto 256: 8,4 em 13 s | teto 2048: 8,1 em 32 s
+#   | sem teto: 7,8 em 56 s
+["qwen3.6:35B"]
+reasoning = true
+body = { chat_template_kwargs = { enable_thinking = true } }
+reasoning_budget_tokens = 256
+
+# O template tem reasoning_effort (padrão xhigh). Aqui pensar rende: "low"
+# pensa até ~2 mil tokens por chamada, então o teto do [default] não o corta.
+#   sem raciocínio 7,8 em 31 s | "low": 9,1 em 61 s | "low" + teto 256: 8,4 em
+#   37 s | teto 256 sem "low": 6,9 em 41 s (pior que não raciocinar)
+["qwen3.8:27B"]
+reasoning = true
+body = { chat_template_kwargs = { enable_thinking = true, reasoning_effort = "low" } }

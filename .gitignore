@@ -8,3 +8,4 @@ evals/results/
 report-versus*.md
 dist/
 search-engine/searxng/data/
+models.toml
