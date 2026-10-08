@@ -132,6 +132,56 @@ class TestChatStream:
         assert result == "inteira"
 
 
+class TestGenerationLoop:
+    def _chat(self, lines):
+        resp = _mock_response(lines=lines)
+        with patch.object(llm, "_resolve_model", return_value="my-model"), \
+             patch("web_search_mcp.llm.requests.post", return_value=resp):
+            return llm.chat(system="sys", user="usr"), resp
+
+    @staticmethod
+    def _endless(prefix, repeated, key="content"):
+        yield from (b"data: " + json.dumps(_delta(**{key: p})).encode() for p in prefix)
+        while True:
+            yield b"data: " + json.dumps(_delta(**{key: repeated})).encode()
+
+    def test_repeated_answer_line_is_cut_and_keeps_what_came_before(self):
+        # O caso de 07/10/2026: a mesma linha do resumo 432 vezes, 84 s.
+        line = "- A cotação comercial registrada foi de R$ 5,0138 na sessão de hoje [1].\n"
+        result, resp = self._chat(self._endless(["O dólar hoje:\n", "- Fechou em R$ 5,0110 [5].\n"], line))
+        assert result == "O dólar hoje:\n- Fechou em R$ 5,0110 [5].\n" + line.rstrip()
+        resp.__exit__.assert_called_once()
+
+    def test_cycle_of_several_lines_is_cut(self):
+        block = "Primeira linha do ciclo.\nSegunda linha do ciclo.\n"
+        result, _ = self._chat(self._endless(["Início.\n"], block))
+        assert result == "Início.\n" + block.rstrip()
+
+    def test_line_split_across_deltas_is_still_seen(self):
+        def stream():
+            yield b"data: " + json.dumps(_delta("Começo.\n")).encode()
+            while True:
+                for piece in ("A mesma frase longa ", "repetida sem parar.", "\n"):
+                    yield b"data: " + json.dumps(_delta(piece)).encode()
+
+        result, _ = self._chat(stream())
+        assert result == "Começo.\nA mesma frase longa repetida sem parar."
+
+    def test_reasoning_loop_raises(self):
+        with pytest.raises(llm.GenerationLoop):
+            self._chat(self._endless([], "Preciso reconsiderar os resultados da busca.\n", key="reasoning"))
+
+    def test_short_repeated_lines_are_not_a_loop(self):
+        # Triagem devolve um número por linha; lista com itens iguais curtos também existe.
+        result, _ = self._chat(_sse(_delta("7\n7\n7\n7\n7\n7\n"), _delta(finish="stop")))
+        assert result == "7\n7\n7\n7\n7\n7\n"
+
+    def test_three_repeats_and_scattered_duplicates_pass(self):
+        text = "Linha que se repete três vezes.\n" * 3 + "Outra coisa.\n" + "Linha que se repete três vezes.\n" * 2
+        result, _ = self._chat(_sse(_delta(text), _delta(finish="stop")))
+        assert result == text
+
+
 class TestReasoningTemperature:
     def _temperature(self, **kwargs):
         with patch.object(config, "MODEL_TEMPERATURE", 0.0), \

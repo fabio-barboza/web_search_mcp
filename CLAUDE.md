@@ -314,7 +314,12 @@ abandoned at the client timeout kept generating server-side (175k tokens,
 19 min) and, with `parallel = 1`, blocked every later call; closing a
 streamed one stops generation at once. Calls that reason use
 `REASONING_TEMPERATURE` (0.6), not `MODEL_TEMPERATURE` (0): greedy decoding
-with reasoning is what looped. `MODEL_MAX_TOKENS` is only a fuse. Each call
+with reasoning is what looped. `MODEL_MAX_TOKENS` is only a fuse. Neither
+temperature nor the fuse prevents a repetition loop (the same summary line
+432 times at temperature 0.6, 84 s): `_LoopDetector` watches the stream and
+cuts when a block of lines repeats 4 times in a row — in the answer it
+returns the text before the cycle, in the reasoning it raises
+`GenerationLoop`. Each call
 logs one `chat:` line (reasoning chars, answer chars, seconds). `_resolve_model` re-queries `GET /models` on
 every call (no caching) when `MODEL` is unset in config, adopting whatever
 model the server already has loaded — this avoids fighting another client

@@ -122,6 +122,62 @@ def context_tokens() -> int:
     return config.MODEL_CONTEXT_TOKENS
 
 
+# Geração em repetição: o modelo entra num ciclo e reescreve o mesmo trecho
+# até alguém cortar. Medido em 07/10/2026 no qwen3.6:35B, duas vezes: 175 mil
+# tokens de raciocínio numa triagem (temperatura 0) e a mesma linha 432 vezes
+# num resumo (temperatura 0.6, 84 s até o teto de tokens). Temperatura não
+# evita, prazo e teto só limitam o estrago; o que corta em segundos é ver a
+# repetição no próprio stream. Um bloco de até _LOOP_MAX_PERIOD linhas que
+# aparece _LOOP_REPEATS vezes seguidas é ciclo. O piso de caracteres deixa de
+# fora o que repete por natureza (um número por linha, separador de tabela).
+_LOOP_REPEATS = 4
+_LOOP_MAX_PERIOD = 8
+_LOOP_MIN_BLOCK_CHARS = 20
+
+
+class GenerationLoop(RuntimeError):
+    """O modelo entrou em repetição antes de produzir uma resposta."""
+
+
+class _LoopDetector:
+    """Acompanha um texto em streaming e acusa quando ele vira um ciclo de linhas."""
+
+    def __init__(self):
+        self._lines: list[str] = []
+        self._ends: list[int] = []  # posição, no texto todo, do fim de cada linha guardada
+        self._pending = ""
+        self._seen = 0
+
+    def feed(self, piece: str) -> int | None:
+        """Devolve onde cortar o texto (fim da 1ª ocorrência do bloco) ao ver um ciclo."""
+        self._pending += piece
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            self._seen += len(line) + 1
+            line = line.strip()
+            if not line:
+                continue
+            self._lines.append(line)
+            self._ends.append(self._seen)
+            cut = self._cycle()
+            if cut is not None:
+                return cut
+        return None
+
+    def _cycle(self) -> int | None:
+        lines = self._lines
+        for period in range(1, _LOOP_MAX_PERIOD + 1):
+            span = period * _LOOP_REPEATS
+            if len(lines) < span:
+                break
+            block = lines[-period:]
+            if sum(len(line) for line in block) < _LOOP_MIN_BLOCK_CHARS:
+                continue
+            if all(lines[-(i + 1) * period:len(lines) - i * period] == block for i in range(1, _LOOP_REPEATS)):
+                return self._ends[len(lines) - span + period - 1]
+        return None
+
+
 def chat(system: str, user: str, temperature: float | None = None, reasoning: bool = False) -> str:
     """Chamada de chat completion numa API compatível com OpenAI.
 
@@ -132,7 +188,9 @@ def chat(system: str, user: str, temperature: float | None = None, reasoning: bo
 
     A resposta é lida em streaming e a chamada inteira tem prazo de
     config.MODEL_TIMEOUT: estourou, a conexão é fechada (o que cancela a
-    geração no servidor) e sobe requests.Timeout.
+    geração no servidor) e sobe requests.Timeout. O mesmo corte acontece
+    quando o texto vira repetição: na resposta, volta o que veio antes do
+    ciclo; no raciocínio não há resposta para devolver e sobe GenerationLoop.
     """
     model = _resolve_model()
     if config.EXTRA_SYSTEM_PROMPT:
@@ -171,6 +229,12 @@ def chat(system: str, user: str, temperature: float | None = None, reasoning: bo
                 r.content  # carrega o corpo antes de a conexão fechar: o log do erro precisa dele
             r.raise_for_status()
             content, reasoning_chars, finish = _read_stream(r, started + config.MODEL_TIMEOUT)
+    except GenerationLoop as e:
+        logger.error(
+            "chat: falha ao chamar %s (model=%s, prompt=%d chars, %.1fs): %s",
+            config.MODEL_BASE_URL, model, prompt_chars, time.monotonic() - started, e,
+        )
+        raise
     except requests.RequestException as e:
         # O corpo diz o que o status esconde ("context length exceeded", nome
         # de modelo errado, param recusado). Sem ele um 400 é indepurável.
@@ -188,6 +252,11 @@ def chat(system: str, user: str, temperature: float | None = None, reasoning: bo
         model, thinking, temperature, prompt_chars, reasoning_chars, len(content), finish,
         time.monotonic() - started,
     )
+    if finish == "loop":
+        logger.error(
+            "chat: resposta em repetição cortada aos %.1fs (model=%s, ficaram %d chars)",
+            time.monotonic() - started, model, len(content),
+        )
     if finish == "length":
         logger.error(
             "chat: geração cortada no teto de %d tokens (model=%s, pensou=%d chars, resposta=%d chars)",
@@ -201,7 +270,8 @@ def _read_stream(r: requests.Response, deadline: float) -> tuple[str, int, str |
 
     O timeout do requests vale por leitura do socket, não pela resposta toda:
     um modelo em loop manda um token atrás do outro e nunca o dispara. Por
-    isso o prazo total é conferido aqui, a cada evento.
+    isso o prazo total é conferido aqui, a cada evento, junto com a repetição
+    (ver _LoopDetector).
     """
     if "text/event-stream" not in r.headers.get("Content-Type", ""):
         # Provider que ignora "stream": resposta inteira num JSON só.
@@ -211,6 +281,7 @@ def _read_stream(r: requests.Response, deadline: float) -> tuple[str, int, str |
     parts: list[str] = []
     reasoning_chars = 0
     finish = None
+    answer_loop, reasoning_loop = _LoopDetector(), _LoopDetector()
     for raw in r.iter_lines():
         if time.monotonic() > deadline:
             raise requests.Timeout(f"prazo total de {config.MODEL_TIMEOUT}s estourado no meio da geração")
@@ -223,8 +294,16 @@ def _read_stream(r: requests.Response, deadline: float) -> tuple[str, int, str |
         if not choices:
             continue
         delta = choices[0].get("delta") or {}
+        thought = delta.get("reasoning_content") or ""
+        reasoning_chars += len(thought)
+        if thought and reasoning_loop.feed(thought) is not None:
+            raise GenerationLoop(f"raciocínio em repetição após {reasoning_chars} chars")
         if delta.get("content"):
             parts.append(delta["content"])
-        reasoning_chars += len(delta.get("reasoning_content") or "")
+            cut = answer_loop.feed(delta["content"])
+            if cut is not None:
+                # Sair do laço fecha a conexão (o `with` de quem chamou) e o
+                # servidor para de gerar.
+                return "".join(parts)[:cut].rstrip(), reasoning_chars, "loop"
         finish = choices[0].get("finish_reason") or finish
     return "".join(parts), reasoning_chars, finish
