@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+import tomllib
 
 from dotenv import load_dotenv
 
@@ -102,24 +103,6 @@ if _reasoning_body_raw:
 else:
     REASONING_BODY = {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "low"}}
 
-# REASONING_BODY_BY_MODEL: REASONING_BODY próprio por modelo, um objeto JSON
-# {"id do modelo": {...}}; modelo fora dele usa o REASONING_BODY. Existe porque
-# o melhor ajuste não é o mesmo entre modelos. Medido em 07/10/2026 (6
-# perguntas x 2 rodadas, nota cega): no qwen3.6:35B, que ignora
-# reasoning_effort, teto de 256 tokens dá 8,4 em 13 s e raciocínio livre 7,8
-# em 56 s; no qwen3.8:27B, "low" sem teto dá 9,1 em 61 s e com teto de 256
-# cai para 8,4 em 37 s.
-_reasoning_by_model_raw = os.getenv("REASONING_BODY_BY_MODEL", "").strip()
-if _reasoning_by_model_raw:
-    try:
-        REASONING_BODY_BY_MODEL = json.loads(_reasoning_by_model_raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"REASONING_BODY_BY_MODEL não é JSON válido: {e}") from e
-    if not isinstance(REASONING_BODY_BY_MODEL, dict):
-        raise ValueError("REASONING_BODY_BY_MODEL precisa ser um objeto JSON {modelo: body}")
-else:
-    REASONING_BODY_BY_MODEL = {}
-
 # Temperatura das chamadas com raciocínio ligado. Separada da
 # MODEL_TEMPERATURE porque decodificação gulosa (0) com raciocínio pode entrar
 # em repetição sem fim: em 07/10/2026 a triagem de uma pesquisa no qwen3.6:35B
@@ -127,6 +110,56 @@ else:
 # para o modo de raciocínio é 0.6. Vazio = usa a MODEL_TEMPERATURE.
 _reasoning_temperature_raw = os.getenv("REASONING_TEMPERATURE", "0.6").strip()
 REASONING_TEMPERATURE = float(_reasoning_temperature_raw) if _reasoning_temperature_raw else None
+
+# Teto de tokens de raciocínio por chamada, enviado como reasoning_budget_tokens
+# (campo do llama.cpp, imposto pelo servidor, independe do chat template) em
+# toda chamada que raciocina. Existe porque nível de esforço não é confiável
+# entre modelos: medido em 07/10/2026, o qwen3.6:35B ignora reasoning_effort e
+# pensa ~7 mil tokens por pesquisa (56 s); com o teto, o custo fica limitado.
+# 2048 é folgado de propósito: o qwen3.8:27B em "low" pensa no máximo ~2 mil
+# tokens por chamada, e teto que corta o raciocínio no meio piora a resposta
+# (256 sobre esforço xhigh: nota 6,9 contra 7,8 sem raciocinar). Calibre por
+# modelo no arquivo abaixo. 0 = não envia (provider que recusa o campo).
+REASONING_BUDGET_TOKENS = int(os.getenv("REASONING_BUDGET_TOKENS", "2048"))
+
+# MODELS_FILE: ajuste de raciocínio por modelo, num TOML. Cada tabela leva o id
+# do modelo como o servidor devolve em GET /models (sem diferenciar maiúsculas)
+# e aceita as chaves de _MODEL_KEYS; [default] vale para modelo sem tabela
+# própria. O que a tabela não define vem do [default], e o que ele não define
+# vem das variáveis acima (USE_REASONING, REASONING_BODY, REASONING_TEMPERATURE,
+# REASONING_BUDGET_TOKENS). Arquivo ausente = só as variáveis valem. Existe
+# porque o melhor ajuste muda de modelo para modelo e o MCP adota o modelo que
+# estiver carregado: medido em 07/10/2026, teto de 256 tokens é o melhor ponto
+# do qwen3.6:35B e "low" sem teto apertado o do qwen3.8:27B (ver
+# models.example.toml).
+MODELS_FILE = os.getenv("MODELS_FILE", "models.toml")
+_MODEL_KEYS = {"reasoning": bool, "temperature": (int, float), "body": dict, "reasoning_budget_tokens": int}
+
+
+def _load_model_settings(path: str) -> dict[str, dict]:
+    try:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+    except FileNotFoundError:
+        return {}
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"{path} não é TOML válido: {e}") from e
+    settings = {}
+    for model, table in raw.items():
+        if not isinstance(table, dict):
+            raise ValueError(f"{path}: '{model}' precisa ser uma tabela, ex. [\"{model}\"]")
+        for key, value in table.items():
+            expected = _MODEL_KEYS.get(key)
+            if expected is None:
+                raise ValueError(f"{path}: chave desconhecida '{key}' em [{model}]; aceitas: {sorted(_MODEL_KEYS)}")
+            # bool é subclasse de int: sem isto `temperature = true` passaria.
+            if not isinstance(value, expected) or (isinstance(value, bool) and expected is not bool):
+                raise ValueError(f"{path}: '{key}' em [{model}] tem tipo errado")
+        settings[model.lower()] = table
+    return settings
+
+
+MODEL_SETTINGS = _load_model_settings(MODELS_FILE)
 
 # EXTRA_SYSTEM_PROMPT: texto apenso ao final do system prompt em toda chamada.
 # Não cabe em EXTRA_BODY porque não é payload da API, é conteúdo de mensagem

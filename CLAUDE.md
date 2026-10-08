@@ -314,9 +314,12 @@ abandoned at the client timeout kept generating server-side (175k tokens,
 19 min) and, with `parallel = 1`, blocked every later call; closing a
 streamed one stops generation at once. Calls that reason use
 `REASONING_TEMPERATURE` (0.6), not `MODEL_TEMPERATURE` (0): greedy decoding
-with reasoning is what looped. `REASONING_BODY_BY_MODEL` overrides
-`REASONING_BODY` per model id (the best setting differs: a 256-token budget
-on qwen3.6, unbounded `low` effort on qwen3.8). `MODEL_MAX_TOKENS` is only a fuse. Neither
+with reasoning is what looped. Reasoning settings are per model:
+`llm._reasoning_settings` reads the model's table in `MODELS_FILE`
+(`models.toml`, see `models.example.toml`) over `[default]` over the env
+vars, because the best setting differs (a 256-token budget on qwen3.6,
+`low` effort on qwen3.8) and the MCP adopts whichever model is loaded.
+`REASONING_BUDGET_TOKENS` (2048) is the default reasoning ceiling. `MODEL_MAX_TOKENS` is only a fuse. Neither
 temperature nor the fuse prevents a repetition loop (the same summary line
 432 times at temperature 0.6, 84 s): `_LoopDetector` watches the stream and
 cuts when a block of lines repeats 4 times in a row — in the answer it

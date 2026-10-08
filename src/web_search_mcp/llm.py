@@ -135,6 +135,21 @@ _LOOP_MAX_PERIOD = 8
 _LOOP_MIN_BLOCK_CHARS = 20
 
 
+def _reasoning_settings(model: str) -> tuple[bool, float | None, dict, int]:
+    """(liga?, temperatura, body, teto de tokens) do raciocínio para o modelo.
+
+    Tabela do modelo no MODELS_FILE, por cima do [default], por cima das
+    variáveis de ambiente (ver config).
+    """
+    settings = {**config.MODEL_SETTINGS.get("default", {}), **config.MODEL_SETTINGS.get(model.lower(), {})}
+    return (
+        settings.get("reasoning", config.USE_REASONING),
+        settings.get("temperature", config.REASONING_TEMPERATURE),
+        settings.get("body", config.REASONING_BODY),
+        settings.get("reasoning_budget_tokens", config.REASONING_BUDGET_TOKENS),
+    )
+
+
 class GenerationLoop(RuntimeError):
     """O modelo entrou em repetição antes de produzir uma resposta."""
 
@@ -181,11 +196,11 @@ class _LoopDetector:
 def chat(system: str, user: str, temperature: float | None = None, reasoning: bool = False) -> str:
     """Chamada de chat completion numa API compatível com OpenAI.
 
-    reasoning=True aplica config.REASONING_BODY (ou o do modelo em
-    REASONING_BODY_BY_MODEL) por cima do EXTRA_BODY quando USE_REASONING está
-    ligado: pedido só pelas chamadas que decidem a
-    qualidade da resposta (ver config). Essas chamadas usam
-    config.REASONING_TEMPERATURE, a não ser que temperature venha explícita.
+    reasoning=True liga o raciocínio como o modelo em uso pede (ver
+    _reasoning_settings): o body dele vai por cima do EXTRA_BODY, com o teto
+    de tokens de raciocínio, e a chamada usa a temperatura de raciocínio, a
+    não ser que temperature venha explícita. Pedido só pelas chamadas que
+    decidem a qualidade da resposta (ver config).
 
     A resposta é lida em streaming e a chamada inteira tem prazo de
     config.MODEL_TIMEOUT: estourou, a conexão é fechada (o que cancela a
@@ -196,12 +211,12 @@ def chat(system: str, user: str, temperature: float | None = None, reasoning: bo
     model = _resolve_model()
     if config.EXTRA_SYSTEM_PROMPT:
         system = f"{system}\n\n{config.EXTRA_SYSTEM_PROMPT}"
-    reasoning_body = config.REASONING_BODY_BY_MODEL.get(model, config.REASONING_BODY)
-    thinking = bool(reasoning and config.USE_REASONING and reasoning_body)
+    enabled, reasoning_temperature, reasoning_body, budget = _reasoning_settings(model)
+    thinking = bool(reasoning and enabled and reasoning_body)
     if temperature is None:
         temperature = config.MODEL_TEMPERATURE
-        if thinking and config.REASONING_TEMPERATURE is not None:
-            temperature = config.REASONING_TEMPERATURE
+        if thinking and reasoning_temperature is not None:
+            temperature = reasoning_temperature
     payload = {
         "model": model,
         "temperature": temperature,
@@ -217,6 +232,9 @@ def chat(system: str, user: str, temperature: float | None = None, reasoning: bo
         payload.update(config.EXTRA_BODY)
     if thinking:
         payload.update(reasoning_body)
+        if budget > 0:
+            # O body do modelo manda: quem definiu o próprio teto fica com ele.
+            payload.setdefault("reasoning_budget_tokens", budget)
     prompt_chars = len(system) + len(user)
     started = time.monotonic()
     try:

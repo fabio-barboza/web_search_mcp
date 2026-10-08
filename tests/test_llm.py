@@ -8,6 +8,14 @@ from web_search_mcp import config
 from web_search_mcp import llm
 
 
+@pytest.fixture(autouse=True)
+def _no_host_model_settings():
+    # models.toml e REASONING_BUDGET_TOKENS vêm do host; cada teste que
+    # precisa deles define os seus.
+    with patch.object(config, "MODEL_SETTINGS", {}), patch.object(config, "REASONING_BUDGET_TOKENS", 0):
+        yield
+
+
 def _sse(*events):
     lines = [b"data: " + json.dumps(e).encode() for e in events]
     return lines + [b"data: [DONE]"]
@@ -209,32 +217,101 @@ class TestReasoningTemperature:
             assert self._temperature(reasoning=True, temperature=0.2) == 0.2
 
 
-class TestReasoningBodyByModel:
-    _DEFAULT = {"chat_template_kwargs": {"enable_thinking": True}, "reasoning_budget_tokens": 256}
-    _OWN = {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "low"}}
+class TestModelSettings:
+    _ENV_BODY = {"chat_template_kwargs": {"enable_thinking": True}}
+    _OWN_BODY = {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "low"}}
 
-    def _body(self, model, **kwargs):
-        with patch.object(config, "USE_REASONING", True), \
+    def _payload(self, model, settings, budget=2048, use_reasoning=False, **kwargs):
+        with patch.object(config, "USE_REASONING", use_reasoning), \
+             patch.object(config, "MODEL_TEMPERATURE", 0.0), \
+             patch.object(config, "REASONING_TEMPERATURE", 0.6), \
+             patch.object(config, "REASONING_BUDGET_TOKENS", budget), \
              patch.object(config, "EXTRA_BODY", {"chat_template_kwargs": {"enable_thinking": False}}), \
-             patch.object(config, "REASONING_BODY", self._DEFAULT), \
-             patch.object(config, "REASONING_BODY_BY_MODEL", {"modelo-b": self._OWN}), \
+             patch.object(config, "REASONING_BODY", self._ENV_BODY), \
+             patch.object(config, "MODEL_SETTINGS", settings), \
              patch.object(llm, "_resolve_model", return_value=model), \
              patch("web_search_mcp.llm.requests.post", return_value=_mock_response()) as post:
             llm.chat(system="sys", user="usr", **kwargs)
         return post.call_args.kwargs["json"]
 
-    def test_listed_model_uses_its_own_body(self):
-        body = self._body("modelo-b", reasoning=True)
-        assert body["chat_template_kwargs"] == self._OWN["chat_template_kwargs"]
-        assert "reasoning_budget_tokens" not in body
+    def test_model_table_turns_reasoning_on_with_its_own_body(self):
+        settings = {"default": {"reasoning": False}, "modelo-b": {"reasoning": True, "body": self._OWN_BODY}}
+        payload = self._payload("modelo-b", settings, reasoning=True)
+        assert payload["chat_template_kwargs"] == self._OWN_BODY["chat_template_kwargs"]
+        assert payload["temperature"] == 0.6
 
-    def test_other_model_uses_the_default_body(self):
-        body = self._body("modelo-a", reasoning=True)
-        assert body["reasoning_budget_tokens"] == 256
+    def test_model_without_table_follows_default(self):
+        settings = {"default": {"reasoning": False}, "modelo-b": {"reasoning": True}}
+        payload = self._payload("modelo-a", settings, use_reasoning=True, reasoning=True)
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+        assert "reasoning_budget_tokens" not in payload
+        assert payload["temperature"] == 0.0
 
-    def test_plain_call_ignores_both(self):
-        body = self._body("modelo-b")
-        assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    def test_model_id_matches_regardless_of_case(self):
+        payload = self._payload("Modelo-B:27B", {"modelo-b:27b": {"reasoning": True}}, reasoning=True)
+        assert payload["chat_template_kwargs"] == self._ENV_BODY["chat_template_kwargs"]
+
+    def test_table_inherits_what_it_does_not_set_from_default(self):
+        settings = {"default": {"reasoning_budget_tokens": 512, "temperature": 0.3}, "modelo-b": {"reasoning": True}}
+        payload = self._payload("modelo-b", settings, reasoning=True)
+        assert payload["reasoning_budget_tokens"] == 512
+        assert payload["temperature"] == 0.3
+
+    def test_default_budget_comes_from_env_and_model_can_override_or_drop_it(self):
+        assert self._payload("m", {"m": {"reasoning": True}}, reasoning=True)["reasoning_budget_tokens"] == 2048
+        own = {"m": {"reasoning": True, "reasoning_budget_tokens": 256}}
+        assert self._payload("m", own, reasoning=True)["reasoning_budget_tokens"] == 256
+        off = {"m": {"reasoning": True, "reasoning_budget_tokens": 0}}
+        assert "reasoning_budget_tokens" not in self._payload("m", off, reasoning=True)
+
+    def test_budget_written_in_the_body_wins(self):
+        settings = {"m": {"reasoning": True, "body": {**self._OWN_BODY, "reasoning_budget_tokens": 128}}}
+        assert self._payload("m", settings, reasoning=True)["reasoning_budget_tokens"] == 128
+
+    def test_plain_call_never_reasons(self):
+        payload = self._payload("m", {"m": {"reasoning": True}})
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+        assert "reasoning_budget_tokens" not in payload
+
+    def test_no_file_means_env_vars_rule(self):
+        payload = self._payload("m", {}, use_reasoning=True, reasoning=True)
+        assert payload["chat_template_kwargs"] == self._ENV_BODY["chat_template_kwargs"]
+        assert payload["reasoning_budget_tokens"] == 2048
+
+
+class TestLoadModelSettings:
+    def test_missing_file_is_empty(self, tmp_path):
+        assert config._load_model_settings(str(tmp_path / "nao-existe.toml")) == {}
+
+    def test_reads_tables_and_lowercases_ids(self, tmp_path):
+        f = tmp_path / "models.toml"
+        f.write_text(
+            '[default]\nreasoning = false\n\n["Qwen:35B"]\nreasoning = true\n'
+            'reasoning_budget_tokens = 256\nbody = { chat_template_kwargs = { enable_thinking = true } }\n'
+        )
+        settings = config._load_model_settings(str(f))
+        assert settings["default"] == {"reasoning": False}
+        assert settings["qwen:35b"]["reasoning_budget_tokens"] == 256
+        assert settings["qwen:35b"]["body"] == {"chat_template_kwargs": {"enable_thinking": True}}
+
+    @pytest.mark.parametrize("content", [
+        '["m"]\nresoning = true\n',          # chave com erro de digitação
+        '["m"]\nreasoning = "sim"\n',        # tipo errado
+        '["m"]\ntemperature = true\n',       # bool não é número
+        'm = 3\n',                            # não é tabela
+        '["m"\nreasoning = true\n',          # TOML quebrado
+    ])
+    def test_bad_file_fails_loudly(self, tmp_path, content):
+        f = tmp_path / "models.toml"
+        f.write_text(content)
+        with pytest.raises(ValueError):
+            config._load_model_settings(str(f))
+
+    def test_example_file_is_valid(self):
+        from pathlib import Path
+        example = Path(__file__).parent.parent / "models.example.toml"
+        settings = config._load_model_settings(str(example))
+        assert settings["default"]["reasoning"] is False
 
 
 class TestResolveModel:

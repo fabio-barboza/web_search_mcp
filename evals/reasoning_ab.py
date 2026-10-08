@@ -106,6 +106,10 @@ _DEFAULT_ARMS = ["sem", "b256", "b512", "b1024", "b2048", "t0.6"]
 def _arm(name: str):
     use_reasoning, temperature, body = _ARMS[name]
     with ExitStack() as stack:
+        # O braço é a configuração inteira: nada do models.toml do host nem o
+        # teto padrão entram (os braços com teto levam o deles no body).
+        stack.enter_context(patch.object(config, "MODEL_SETTINGS", {}))
+        stack.enter_context(patch.object(config, "REASONING_BUDGET_TOKENS", 0))
         stack.enter_context(patch.object(config, "USE_REASONING", use_reasoning))
         stack.enter_context(patch.object(config, "REASONING_TEMPERATURE", temperature))
         if body is not None:
@@ -139,6 +143,7 @@ def _judge_config(model: str):
             ("MODEL", config.EVAL_JUDGE_MODEL or model),
             ("MODEL_BASE_URL", config.EVAL_JUDGE_BASE_URL),
             ("MODEL_API_KEY", config.EVAL_JUDGE_API_KEY),
+            ("MODEL_SETTINGS", {}),
             ("USE_REASONING", False),
             ("MODEL_TEMPERATURE", 0.0),
         ):
