@@ -209,6 +209,34 @@ class TestReasoningTemperature:
             assert self._temperature(reasoning=True, temperature=0.2) == 0.2
 
 
+class TestReasoningBodyByModel:
+    _DEFAULT = {"chat_template_kwargs": {"enable_thinking": True}, "reasoning_budget_tokens": 256}
+    _OWN = {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "low"}}
+
+    def _body(self, model, **kwargs):
+        with patch.object(config, "USE_REASONING", True), \
+             patch.object(config, "EXTRA_BODY", {"chat_template_kwargs": {"enable_thinking": False}}), \
+             patch.object(config, "REASONING_BODY", self._DEFAULT), \
+             patch.object(config, "REASONING_BODY_BY_MODEL", {"modelo-b": self._OWN}), \
+             patch.object(llm, "_resolve_model", return_value=model), \
+             patch("web_search_mcp.llm.requests.post", return_value=_mock_response()) as post:
+            llm.chat(system="sys", user="usr", **kwargs)
+        return post.call_args.kwargs["json"]
+
+    def test_listed_model_uses_its_own_body(self):
+        body = self._body("modelo-b", reasoning=True)
+        assert body["chat_template_kwargs"] == self._OWN["chat_template_kwargs"]
+        assert "reasoning_budget_tokens" not in body
+
+    def test_other_model_uses_the_default_body(self):
+        body = self._body("modelo-a", reasoning=True)
+        assert body["reasoning_budget_tokens"] == 256
+
+    def test_plain_call_ignores_both(self):
+        body = self._body("modelo-b")
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
 class TestResolveModel:
     def test_explicit_model_skips_network(self):
         with patch.object(config, "MODEL", "explicit-model"), \

@@ -102,6 +102,24 @@ if _reasoning_body_raw:
 else:
     REASONING_BODY = {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "low"}}
 
+# REASONING_BODY_BY_MODEL: REASONING_BODY próprio por modelo, um objeto JSON
+# {"id do modelo": {...}}; modelo fora dele usa o REASONING_BODY. Existe porque
+# o melhor ajuste não é o mesmo entre modelos. Medido em 07/10/2026 (6
+# perguntas x 2 rodadas, nota cega): no qwen3.6:35B, que ignora
+# reasoning_effort, teto de 256 tokens dá 8,4 em 13 s e raciocínio livre 7,8
+# em 56 s; no qwen3.8:27B, "low" sem teto dá 9,1 em 61 s e com teto de 256
+# cai para 8,4 em 37 s.
+_reasoning_by_model_raw = os.getenv("REASONING_BODY_BY_MODEL", "").strip()
+if _reasoning_by_model_raw:
+    try:
+        REASONING_BODY_BY_MODEL = json.loads(_reasoning_by_model_raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"REASONING_BODY_BY_MODEL não é JSON válido: {e}") from e
+    if not isinstance(REASONING_BODY_BY_MODEL, dict):
+        raise ValueError("REASONING_BODY_BY_MODEL precisa ser um objeto JSON {modelo: body}")
+else:
+    REASONING_BODY_BY_MODEL = {}
+
 # Temperatura das chamadas com raciocínio ligado. Separada da
 # MODEL_TEMPERATURE porque decodificação gulosa (0) com raciocínio pode entrar
 # em repetição sem fim: em 07/10/2026 a triagem de uma pesquisa no qwen3.6:35B

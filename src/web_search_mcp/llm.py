@@ -181,8 +181,9 @@ class _LoopDetector:
 def chat(system: str, user: str, temperature: float | None = None, reasoning: bool = False) -> str:
     """Chamada de chat completion numa API compatível com OpenAI.
 
-    reasoning=True aplica config.REASONING_BODY por cima do EXTRA_BODY quando
-    USE_REASONING está ligado: pedido só pelas chamadas que decidem a
+    reasoning=True aplica config.REASONING_BODY (ou o do modelo em
+    REASONING_BODY_BY_MODEL) por cima do EXTRA_BODY quando USE_REASONING está
+    ligado: pedido só pelas chamadas que decidem a
     qualidade da resposta (ver config). Essas chamadas usam
     config.REASONING_TEMPERATURE, a não ser que temperature venha explícita.
 
@@ -195,7 +196,8 @@ def chat(system: str, user: str, temperature: float | None = None, reasoning: bo
     model = _resolve_model()
     if config.EXTRA_SYSTEM_PROMPT:
         system = f"{system}\n\n{config.EXTRA_SYSTEM_PROMPT}"
-    thinking = bool(reasoning and config.USE_REASONING and config.REASONING_BODY)
+    reasoning_body = config.REASONING_BODY_BY_MODEL.get(model, config.REASONING_BODY)
+    thinking = bool(reasoning and config.USE_REASONING and reasoning_body)
     if temperature is None:
         temperature = config.MODEL_TEMPERATURE
         if thinking and config.REASONING_TEMPERATURE is not None:
@@ -214,7 +216,7 @@ def chat(system: str, user: str, temperature: float | None = None, reasoning: bo
     if config.EXTRA_BODY:
         payload.update(config.EXTRA_BODY)
     if thinking:
-        payload.update(config.REASONING_BODY)
+        payload.update(reasoning_body)
     prompt_chars = len(system) + len(user)
     started = time.monotonic()
     try:
