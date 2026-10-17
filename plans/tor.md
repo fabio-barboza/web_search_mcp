@@ -138,9 +138,9 @@ Arquivos do deploy:
 ├── .env            # TOR_CONTROL_PASSWORD (não versionado, chmod 600)
 ```
 
-**Imagem** (`Dockerfile`): `alpine:3.23` + `apk add tor=0.4.9.12-r0 curl`.
+**Imagem** (`Dockerfile`): `alpine:3.23` + `apk add tor=0.4.9.14-r0 curl`.
 Versão fixada. A Tor Project não publica imagem Docker oficial do cliente;
-o pacote do Alpine community é o mesmo tor 0.4.9 (medido: 0.4.9.12-r0).
+o pacote do Alpine community é o mesmo tor 0.4.9 (medido: 0.4.9.12-r0; em 2026-10-16 o Alpine 3.23 so tinha 0.4.9.14-r0).
 Roda como o usuário `tor` que o pacote cria. Não é o Tor Browser (interface
 gráfica): é só o daemon, que é o que o MCP usa.
 

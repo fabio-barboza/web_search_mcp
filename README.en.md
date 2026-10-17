@@ -150,7 +150,7 @@ docker compose up -d --wait
 ```
 
 The first start builds the Tor image locally (`search-engine/tor/`: Alpine
-with the `tor` package pinned to `0.4.9.12-r0`), so it takes longer and needs
+with the `tor` package pinned to `0.4.9.14-r0`), so it takes longer and needs
 internet access. If Alpine drops that version from its repository, the build
 fails — bump the number in the `Dockerfile`. `--wait` holds the command until
 the Tor channels are `healthy` (bootstrap takes up to ~60 s); without it,

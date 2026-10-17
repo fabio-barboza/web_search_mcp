@@ -10,7 +10,7 @@
 # dispara 5 (medido em 10/09/2026: busca p50 9,7 s com dois canais).
 x-tor: &tor
   build: ./tor
-  image: web-search-tor:0.4.9.12
+  image: web-search-tor:0.4.9.14
   restart: unless-stopped
   # O MESMO .env da raiz que configura o MCP: dali sai o TOR_CONTROL_PASSWORD
   # (senha do ControlPort, usada no NEWNYM), então os dois lados nunca
