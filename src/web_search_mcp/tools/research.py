@@ -332,22 +332,32 @@ def _normalize_url(url: str) -> str:
 def _search_one(args: tuple[str, bool]) -> list[dict]:
     """Busca uma query, com o fallback de data. Usada em paralelo."""
     query, recent = args
-    results: list[dict] = []
-    seen: set[str] = set()
 
-    if recent:
-        results = _search.search(query, time_range=_RECENT_WINDOW)
+    if not recent:
+        return list(_search.search(query))
+
+    # Com data e sem data saem juntas: esperar a com data voltar para só então
+    # decidir pela sem data custava uma ida inteira ao Google em quase toda
+    # pesquisa de notícia. O resultado é o mesmo de antes: a sem data só
+    # entra se a com data trouxe menos que max_results.
+    pool = ThreadPoolExecutor(max_workers=2)
+    try:
+        dated_f = pool.submit(_search.search, query, time_range=_RECENT_WINDOW)
+        undated_f = pool.submit(_search.search, query)
+        results = list(dated_f.result())
+        if len(results) >= _search.max_results:
+            return results  # a sem data termina em segundo plano e é descartada
+        # Filtro de data zera temas históricos (ex.: "quem foi Santos
+        # Dumont" com time_range=day devolve 0). Completa sem filtro.
         seen = {r.get("url", "") for r in results}
-
-    # Fallback: filtro de data zera temas históricos (ex.: "quem foi Santos
-    # Dumont" com time_range=day devolve 0). Completa sem filtro.
-    if len(results) < _search.max_results:
-        for r in _search.search(query):
+        for r in undated_f.result():
             url = r.get("url", "")
             if url and url not in seen:
                 results.append(r)
                 seen.add(url)
-    return results
+        return results
+    finally:
+        pool.shutdown(wait=False)
 
 
 def _search_one_safe(args: tuple[str, bool]) -> list[dict]:
@@ -371,21 +381,19 @@ def _collect_links(query: str, recent: bool, carried: tuple[str, ...] = ()) -> l
     carried: buscas de nomes que uma chamada anterior do mesmo turno tinha e
     esta perdeu (_carried_from_chain).
     """
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    # As variantes saem assim que o LLM as devolve, sem esperar a busca da
+    # pergunta original terminar: antes eram duas idas ao Google em fila.
+    with ThreadPoolExecutor(max_workers=8) as pool:
         original = pool.submit(_search_one, (query, recent))
-        variants = pool.submit(_generate_queries, query)
-        queries = variants.result()
-        original_results = original.result()
+        queries = _generate_queries(query)
 
-    # _generate_queries devolve a pergunta original em primeiro lugar; ela já
-    # foi buscada acima, então aqui só faltam as variantes.
-    extras = [q for q in queries if q != query]
-    extras += [c for c in carried if c.lower() not in {q.lower() for q in queries}]
-    if extras:
-        with ThreadPoolExecutor(max_workers=len(extras)) as pool:
-            per_query = list(pool.map(_search_one_safe, [(q, recent) for q in extras]))
-    else:
-        per_query = []
+        # _generate_queries devolve a pergunta original em primeiro lugar; ela
+        # já está sendo buscada acima, então aqui só faltam as variantes.
+        extras = [q for q in queries if q != query]
+        extras += [c for c in carried if c.lower() not in {q.lower() for q in queries}]
+        futures = [pool.submit(_search_one_safe, (q, recent)) for q in extras]
+        original_results = original.result()
+        per_query = [f.result() for f in futures]
     per_query.insert(0, original_results)
 
     # Sem teto de domínio aqui: ele é aplicado depois da triagem, em
