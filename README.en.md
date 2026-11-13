@@ -11,13 +11,13 @@ embedded agent framework: just [FastMCP](https://gofastmcp.com).
 **It is not an MCP for SearXNG.** Search is its own, with two sources:
 
 - **Google via Tor, the primary.** The server queries Google (through the
-  Google CSE endpoint) over four Tor channels, rotating queries across them.
+  Google CSE endpoint) over eight Tor channels, rotating queries across them.
   When Google blocks a channel, the query retries on another one immediately
   and the blocked one gets a new IP in the background.
 - **SearXNG, the fallback.** Only used when Google fails on every path — or
   always, if you prefer, with `SEARCH_BACKEND=searxng`.
 
-The whole stack (four Tor containers + SearXNG) ships ready as a
+The whole stack (eight Tor containers + SearXNG) ships ready as a
 `docker compose` in `search-engine/`. Details in
 [Where the links come from](#where-the-links-come-from-google-via-tor-searxng-as-fallback).
 
@@ -74,7 +74,7 @@ the agent, unsummarized.
 ## Where the links come from: Google via Tor, SearXNG as fallback
 
 `research_web` searches Google through the Google CSE endpoint (the same one
-the embeddable search widget uses), over four Tor channels. SearXNG stays in
+the embeddable search widget uses), over eight Tor channels. SearXNG stays in
 the stack, but as a fallback.
 
 **Why.** SearXNG scrapes search engines and, under normal use, gets CAPTCHAs
@@ -135,7 +135,7 @@ Portuguese).
 
 - Python ≥ 3.13
 - [uv](https://docs.astral.sh/uv/)
-- The search stack: four Tor containers (links come from the Google CSE, queried through them) and a fallback [SearXNG](https://docs.searxng.org/) with the JSON format enabled — all in a ready-made `docker compose` in [`search-engine/`](#search-infrastructure-via-docker-compose). Without Tor, search still works (direct CSE, then SearXNG); `SEARCH_BACKEND=searxng` uses SearXNG only
+- The search stack: eight Tor containers (links come from the Google CSE, queried through them) and a fallback [SearXNG](https://docs.searxng.org/) with the JSON format enabled — all in a ready-made `docker compose` in [`search-engine/`](#search-infrastructure-via-docker-compose). Without Tor, search still works (direct CSE, then SearXNG); `SEARCH_BACKEND=searxng` uses SearXNG only
 - An LLM server with an OpenAI-compatible API (`/v1/chat/completions` and `/v1/models`) — e.g. [llama.cpp server](https://github.com/ggml-org/llama.cpp), vLLM, or OpenAI itself
 
 ### Search infrastructure via docker compose
@@ -165,6 +165,7 @@ It starts:
 | `tor-b` | `127.0.0.1:9070` SOCKS, `9071` control | second channel, independent of the first |
 | `tor-c` | `127.0.0.1:9080` SOCKS, `9081` control | third channel |
 | `tor-d` | `127.0.0.1:9090` SOCKS, `9091` control | fourth channel |
+| `tor-e`..`tor-h` | `127.0.0.1:9100`/`9110`/`9120`/`9130` SOCKS, `+1` control | channels five to eight (spare circuits for hedged and retried queries) |
 | `mcp-searxng` + `caddy` | `8887` | third-party MCP search server, independent of this project (see below) |
 
 The Tor containers read the **same root `.env`** that configures the MCP
@@ -340,9 +341,9 @@ After=network.target
 
 [Service]
 Environment=MODEL_BASE_URL=http://localhost:8200/v1
-# Search: Google CSE over the four Tor channels of search-engine/, SearXNG as fallback
+# Search: Google CSE over the eight Tor channels of search-engine/, SearXNG as fallback
 Environment=SEARCH_BACKEND=google_tor
-Environment=TOR_CHANNELS=127.0.0.1:9060:9061,127.0.0.1:9070:9071,127.0.0.1:9080:9081,127.0.0.1:9090:9091
+Environment=TOR_CHANNELS=127.0.0.1:9060:9061,127.0.0.1:9070:9071,127.0.0.1:9080:9081,127.0.0.1:9090:9091,127.0.0.1:9100:9101,127.0.0.1:9110:9111,127.0.0.1:9120:9121,127.0.0.1:9130:9131
 Environment=SEARXNG_URL=http://localhost:8886
 # TOR_CONTROL_PASSWORD lives outside the unit, in a file only you can read (chmod 600)
 EnvironmentFile=%h/.config/web-search-mcp/secrets.env
@@ -501,11 +502,14 @@ The path of each query is described in
 | Variable | Default | What it does |
 |---|---|---|
 | `SEARCH_BACKEND` | `google_tor` | `google_tor` (Google CSE over the Tor channels, with direct CSE and SearXNG as fallback) or `searxng` (SearXNG only, as before). Rollback is changing it and restarting |
-| `TOR_CHANNELS` | `127.0.0.1:9060:9061,127.0.0.1:9070:9071,127.0.0.1:9080:9081,127.0.0.1:9090:9091` | One channel per item, `host:socks_port:control_port`, comma-separated. The default matches `tor-a`..`tor-d` in `search-engine/`. Accepts any number; with fewer than three, failover reuses a channel (already on a new circuit) |
+| `TOR_CHANNELS` | `127.0.0.1:9060:9061,127.0.0.1:9070:9071,127.0.0.1:9080:9081,127.0.0.1:9090:9091,127.0.0.1:9100:9101,127.0.0.1:9110:9111,127.0.0.1:9120:9121,127.0.0.1:9130:9131` | One channel per item, `host:socks_port:control_port`, comma-separated. The default matches `tor-a`..`tor-h` in `search-engine/`. Accepts any number; with fewer than three, failover reuses a channel (already on a new circuit) |
 | `TOR_CONTROL_PASSWORD` | *(empty)* | ControlPort password, for `NEWNYM`. The Tor containers won't start without it; the MCP will — empty only disables `NEWNYM`, and circuit rotation via the SOCKS credential keeps working |
 | `GOOGLE_CSE_CX` | blackle.com's public CX | Which CSE to query. Swap in your own CX without touching the code |
 | `GOOGLE_CSE_HL` | `pt-BR` | CSE interface language. Does not restrict the language of results |
-| `GOOGLE_CSE_TIMEOUT` | `15` | Timeout, in seconds, of each CSE request (via Tor it takes 2-4 s) |
+| `GOOGLE_CSE_TIMEOUT` | `8` | Timeout, in seconds, of each CSE request (via Tor it takes 2-4 s) |
+| `GOOGLE_CSE_HEDGE_SECONDS` | `3.5` | An attempt with no answer within this time gets a sibling on another channel; the first one back wins. `0` turns it off |
+| `GOOGLE_CSE_WARM_SECONDS` | `240` | Every N seconds the server reopens each channel's connection to Google (only `cse.js`, no search). `0` turns it off |
+| `SEARCH_CACHE_SECONDS` | `600` | Same query, with the same date filter, within this window is not sent again. `0` turns it off |
 | `GOOGLE_CSE_DIRECT_FALLBACK` | `true` | Try the CSE from the machine's IP when the Tor channels fail. Don't count on it: the home IP gets 429s too |
 | `SEARXNG_FALLBACK` | `true` | Fall back to SearXNG when Google failed on every path. With `false`, the search returns a search error in that case |
 
@@ -637,7 +641,7 @@ is usually committed when it's in project scope. In that case register with
 repository.
 
 Tor search needs nothing in the `env` block if the `search-engine/` stack is
-on the same machine: the `TOR_CHANNELS` default already points at the four
+on the same machine: the `TOR_CHANNELS` default already points at the eight
 channels on `127.0.0.1`. `TOR_CONTROL_PASSWORD` is optional for the MCP —
 without it only `NEWNYM` is disabled — and, if you pass it via `-e`, the same
 caveat as `MODEL_API_KEY` applies: it sits in plain text in the file.
