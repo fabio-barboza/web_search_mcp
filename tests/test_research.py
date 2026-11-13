@@ -442,6 +442,38 @@ class TestSearchOne:
         assert "http://b.com" in urls
 
 
+    def test_recent_full_dated_result_ignores_undated(self):
+        dated = [{"url": f"http://d{i}.com"} for i in range(research._search.max_results)]
+
+        def fake_search(query, time_range=None):
+            return list(dated) if time_range else [{"url": "http://undated.com"}]
+
+        with patch.object(research._search, "search", side_effect=fake_search):
+            results = research._search_one(("q", True))
+        assert [r["url"] for r in results] == [r["url"] for r in dated]
+
+    def test_recent_dated_and_undated_run_together(self):
+        import threading
+        import time as _time
+        started = []
+        both = threading.Event()
+
+        def fake_search(query, time_range=None):
+            started.append(time_range)
+            if len(started) == 2:
+                both.set()
+            # Em fila, a primeira esperaria a segunda que nunca sai: só passa
+            # se as duas estiverem rodando ao mesmo tempo.
+            assert both.wait(1.0), "com data e sem data não rodaram juntas"
+            return [{"url": f"http://{time_range or 'none'}.com"}]
+
+        start = _time.monotonic()
+        with patch.object(research._search, "search", side_effect=fake_search):
+            results = research._search_one(("q", True))
+        assert _time.monotonic() - start < 1.0
+        assert [r["url"] for r in results] == ["http://day.com", "http://none.com"]
+
+
 class TestReadPages:
     def test_failed_page_does_not_spend_budget(self):
         candidates = [{"url": f"http://x.com/{i}"} for i in range(6)]
@@ -534,6 +566,24 @@ class TestRenderDossier:
 
 
 class TestCollectLinks:
+    def test_variants_do_not_wait_for_the_original_search(self):
+        import threading
+        variant_started = threading.Event()
+
+        def fake_search_one(args):
+            query, _recent = args
+            if query == "pergunta":
+                # A original só termina depois que uma variante já começou.
+                assert variant_started.wait(1.0), "variante esperou a original"
+                return [{"url": "http://a.com"}]
+            variant_started.set()
+            return [{"url": "http://b.com"}]
+
+        with patch("web_search_mcp.tools.research._generate_queries", return_value=["pergunta", "q2"]), \
+             patch("web_search_mcp.tools.research._search_one", side_effect=fake_search_one):
+            urls = {r["url"] for r in research._collect_links("pergunta", False)}
+        assert urls == {"http://a.com", "http://b.com"}
+
     def test_round_robin_dedupe_and_pool_cap(self):
         # _generate_queries sempre devolve a pergunta original em primeiro
         # lugar; _collect_links conta com isso para não buscá-la duas vezes.

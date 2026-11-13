@@ -214,7 +214,7 @@ if SEARCH_BACKEND not in ("google_tor", "searxng"):
     raise ValueError(f"SEARCH_BACKEND={SEARCH_BACKEND!r}: use google_tor ou searxng")
 
 TOR_CHANNELS = _parse_tor_channels(
-    os.getenv("TOR_CHANNELS", "127.0.0.1:9060:9061,127.0.0.1:9070:9071,127.0.0.1:9080:9081,127.0.0.1:9090:9091")
+    os.getenv("TOR_CHANNELS", "127.0.0.1:9060:9061,127.0.0.1:9070:9071,127.0.0.1:9080:9081,127.0.0.1:9090:9091,127.0.0.1:9100:9101,127.0.0.1:9110:9111,127.0.0.1:9120:9121,127.0.0.1:9130:9131")
 )
 # Vazia não quebra a busca: sem ela o NEWNYM fica desligado e o canal barrado
 # troca de circuito só pela credencial SOCKS nova (IsolateSOCKSAuth), que já
@@ -227,9 +227,22 @@ GOOGLE_CSE_CX = os.getenv("GOOGLE_CSE_CX", "partner-pub-8993703457585266:4862972
 # páginas (mesma lição do SEARXNG_LANGUAGE=auto acima).
 GOOGLE_CSE_HL = os.getenv("GOOGLE_CSE_HL", "pt-BR")
 # Por requisição. Medido em 10/09/2026, 8 circuitos novos: 2-4 s por
-# requisição via Tor, contando a montagem do circuito.
-GOOGLE_CSE_TIMEOUT = int(os.getenv("GOOGLE_CSE_TIMEOUT", "15"))
+# requisição via Tor, contando a montagem do circuito. Era 15: com a
+# tentativa irmã (GOOGLE_CSE_HEDGE_SECONDS) um circuito travado não segura
+# mais a query, e 8 s ainda cobre o circuito frio mais lento medido (7,6 s).
+GOOGLE_CSE_TIMEOUT = int(os.getenv("GOOGLE_CSE_TIMEOUT", "8"))
 GOOGLE_CSE_DIRECT_FALLBACK = _env_bool("GOOGLE_CSE_DIRECT_FALLBACK", True)
+# Tentativa que não respondeu neste prazo ganha uma irmã em outro canal, e
+# vale a que voltar primeiro. Medido em 13/11/2026: com conexão já aberta a
+# busca volta em 1,7-2,9 s; circuito frio ou lento passa de 5 s. 0 desliga.
+GOOGLE_CSE_HEDGE_SECONDS = float(os.getenv("GOOGLE_CSE_HEDGE_SECONDS", "3.5"))
+# De quanto em quanto tempo o aquecedor (server.py) refaz a conexão de cada
+# canal com o Google (só o cse.js, nenhuma busca). Mantém circuito montado e
+# TLS aberto para a próxima busca não pagar ~3-5 s. 0 desliga.
+GOOGLE_CSE_WARM_SECONDS = float(os.getenv("GOOGLE_CSE_WARM_SECONDS", "240"))
+# Resultado de busca reaproveitado para a mesma query (e o mesmo filtro de
+# data) dentro desta janela. 0 desliga.
+SEARCH_CACHE_SECONDS = float(os.getenv("SEARCH_CACHE_SECONDS", "600"))
 SEARXNG_FALLBACK = _env_bool("SEARXNG_FALLBACK", True)
 
 # --- Scraper ---

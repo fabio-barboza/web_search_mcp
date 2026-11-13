@@ -100,3 +100,45 @@ class TestBuildSearch:
         monkeypatch.setattr(config, "SEARCH_BACKEND", "google_tor")
         monkeypatch.setattr(config, "SEARXNG_FALLBACK", False)
         assert build_search().fallback is None
+
+
+class TestCache:
+    def test_same_query_within_window_is_served_from_cache(self):
+        g = _google()
+        chain = SearchChain(g, _searxng(), cache_seconds=60)
+        first = chain.search("Dólar  hoje")
+        first[0]["title"] = "mexido por quem chamou"
+        second = chain.search("dólar hoje")
+        assert g.search.call_count == 1
+        assert second[0]["title"] == "a"
+
+    def test_time_range_is_part_of_the_key(self):
+        g = _google()
+        chain = SearchChain(g, None, cache_seconds=60)
+        chain.search("q")
+        chain.search("q", time_range="day")
+        assert g.search.call_count == 2
+
+    def test_expired_entry_searches_again(self):
+        g = _google()
+        chain = SearchChain(g, None, cache_seconds=60)
+        with patch("web_search_mcp.util.search_chain.time.monotonic", side_effect=[0, 100, 100]):
+            chain.search("q")
+            chain.search("q")
+        assert g.search.call_count == 2
+
+    def test_searxng_fallback_is_not_cached(self):
+        g = _google(down=True)
+        s = _searxng()
+        chain = SearchChain(g, s, cache_seconds=60)
+        chain.search("q")
+        chain.search("q")
+        assert g.search.call_count == 2
+        assert s.search.call_count == 2
+
+    def test_cache_off(self):
+        g = _google()
+        chain = SearchChain(g, None, cache_seconds=0)
+        chain.search("q")
+        chain.search("q")
+        assert g.search.call_count == 2

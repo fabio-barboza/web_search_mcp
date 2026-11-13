@@ -59,7 +59,7 @@ def _via(proxies):
 
 
 class FakeGoogle:
-    """requests.get falso: `search(via, params)` decide a resposta da busca."""
+    """HTTP falso: `search(via, params)` decide a resposta da busca."""
 
     def __init__(self, search, token=lambda via: _resp(CSE_JS)):
         self._search = search
@@ -92,7 +92,7 @@ def _client(direct=True):
 
 
 def _run(client, fake, *args, **kwargs):
-    with patch.object(google_cse.requests, "get", side_effect=fake):
+    with patch.object(google_cse, "_session_get", side_effect=lambda _session, url, **kw: fake(url, **kw)):
         return client.search(*args, **kwargs)
 
 
@@ -285,3 +285,122 @@ class TestToken:
         assert _run(_client(), fake, "q")
         assert fake.tokens == ["tor-a#0", "tor-b#0"]
         assert fake.vias == ["tor-b#0"]
+
+
+def _slow_then(delay, response):
+    def search(via, params):
+        if via.startswith("tor-a"):
+            time.sleep(delay)
+        return _resp(response)
+    return search
+
+
+class TestHedge:
+    def test_slow_channel_gets_a_sibling_and_first_answer_wins(self):
+        client = _client()
+        client.hedge_seconds = 0.05
+        fake = FakeGoogle(_slow_then(0.5, OK))
+        start = time.monotonic()
+        out = _run(client, fake, "q")
+        assert time.monotonic() - start < 0.4
+        assert out[0]["engines"] == ["google cse (tor-b)"]
+        assert fake.vias[:2] == ["tor-a#0", "tor-b#0"]
+        assert client.stats()["hedge"] == 1
+
+    def test_fast_channel_has_no_sibling(self):
+        client = _client()
+        client.hedge_seconds = 0.5
+        fake = FakeGoogle(lambda via, p: _resp(OK))
+        _run(client, fake, "q")
+        assert fake.vias == ["tor-a#0"]
+        assert "hedge" not in client.stats()
+
+    def test_hedge_off(self):
+        client = _client()
+        client.hedge_seconds = 0
+        fake = FakeGoogle(_slow_then(0.2, OK))
+        out = _run(client, fake, "q")
+        assert fake.vias == ["tor-a#0"]
+        assert out[0]["engines"] == ["google cse (tor-a)"]
+
+    def test_direct_never_races_tor(self):
+        """O direto só entra quando todas as tentativas Tor falharam."""
+        client = _client()
+        client.hedge_seconds = 0.01
+
+        def search(via, params):
+            if via.startswith("tor-"):
+                time.sleep(0.05)
+                return _resp(BLOCKED)
+            return _resp(OK)
+
+        fake = FakeGoogle(search)
+        out = _run(client, fake, "q")
+        assert fake.vias[-1] == "direto"
+        assert fake.vias.count("direto") == 1
+        assert out[0]["engines"] == ["google cse (direto)"]
+
+    def test_block_while_sibling_runs_launches_next_at_once(self):
+        pool = ChannelPool([TorChannel(f"tor-{x}", "127.0.0.1", 1, 2) for x in "abc"])
+        client = GoogleCSE(pool, cx="cx1", hl="pt-BR", timeout=5, direct_fallback=True,
+                           max_results=10, hedge_seconds=0.05)
+
+        def search(via, params):
+            if via.startswith("tor-a"):
+                time.sleep(0.5)
+                return _resp(OK)
+            if via.startswith("tor-b"):
+                return _resp(BLOCKED)
+            return _resp(OK)
+
+        fake = FakeGoogle(search)
+        start = time.monotonic()
+        out = _run(client, fake, "q")
+        # tor-a lento -> irmã no tor-b, que barra -> tor-c sai na hora, sem
+        # esperar outro prazo nem a tor-a terminar.
+        assert time.monotonic() - start < 0.3
+        assert out[0]["engines"] == ["google cse (tor-c)"]
+        assert fake.vias[:3] == ["tor-a#0", "tor-b#0", "tor-c#0"]
+
+
+class TestSessions:
+    def test_session_reused_until_channel_renews(self):
+        client = _client()
+        a = client.pool.channels[0]
+        s1 = client._session(a.proxies())
+        assert client._session(a.proxies()) is s1
+        a.renew()
+        s2 = client._session(a.proxies())
+        assert s2 is not s1
+        assert client._session(None) is not s2
+
+
+class TestWarm:
+    def test_warm_fetches_token_through_channel(self):
+        client = _client()
+        fake = FakeGoogle(lambda via, p: _resp(OK))
+        with patch.object(google_cse, "_session_get", side_effect=lambda _s, url, **kw: fake(url, **kw)):
+            client._warm(client.pool.channels[1])
+        assert fake.tokens == ["tor-b#0"]
+        assert fake.searches == []
+
+    def test_warm_failure_never_raises(self):
+        client = _client()
+        fake = FakeGoogle(lambda via, p: _resp(OK), token=lambda via: _resp("", status=429))
+        with patch.object(google_cse, "_session_get", side_effect=lambda _s, url, **kw: fake(url, **kw)):
+            client._warm(client.pool.channels[0])
+
+    def test_renewed_channel_is_warmed_only_with_warmer_on(self):
+        client = _client()
+        fake = FakeGoogle(lambda via, p: _resp(BLOCKED) if via == "tor-a#0" else _resp(OK))
+        with patch.object(client, "_warm") as warm:
+            _run(client, fake, "q")
+            client._attempts.shutdown(wait=True)
+        warm.assert_not_called()
+
+        client = _client()
+        client._warm_seconds = 60
+        with patch.object(client, "_warm") as warm:
+            _run(client, fake, "q")
+            client._attempts.shutdown(wait=True)
+        warm.assert_called_once_with(client.pool.channels[0])

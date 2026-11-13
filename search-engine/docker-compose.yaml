@@ -170,6 +170,42 @@ services:
     volumes:
       - tor-d-data:/var/lib/tor
 
+  tor-e:
+    <<: *tor
+    container_name: tor-e
+    ports:
+      - "127.0.0.1:9100:9050"   # SOCKS
+      - "127.0.0.1:9101:9051"   # controle
+    volumes:
+      - tor-e-data:/var/lib/tor
+
+  tor-f:
+    <<: *tor
+    container_name: tor-f
+    ports:
+      - "127.0.0.1:9110:9050"   # SOCKS
+      - "127.0.0.1:9111:9051"   # controle
+    volumes:
+      - tor-f-data:/var/lib/tor
+
+  tor-g:
+    <<: *tor
+    container_name: tor-g
+    ports:
+      - "127.0.0.1:9120:9050"   # SOCKS
+      - "127.0.0.1:9121:9051"   # controle
+    volumes:
+      - tor-g-data:/var/lib/tor
+
+  tor-h:
+    <<: *tor
+    container_name: tor-h
+    ports:
+      - "127.0.0.1:9130:9050"   # SOCKS
+      - "127.0.0.1:9131:9051"   # controle
+    volumes:
+      - tor-h-data:/var/lib/tor
+
 networks:
   searxng:
     driver: bridge
@@ -181,3 +217,7 @@ volumes:
   tor-b-data:
   tor-c-data:
   tor-d-data:
+  tor-e-data:
+  tor-f-data:
+  tor-g-data:
+  tor-h-data:
