@@ -187,6 +187,12 @@ def main() -> None:
     parser.add_argument("--http", action="store_true", help="Sobe em streamable-http em vez de stdio")
     args = parser.parse_args()
 
+    # Circuitos Tor montados e TLS aberto antes da primeira busca.
+    from .tools import research
+    from .util.search_chain import start_background
+
+    start_background(research._search)
+
     if args.http:
         # mcp.run(transport="http") não expõe middleware ASGI (CORS inclusive):
         # precisa montar o app via http_app() e servir com uvicorn na mão.

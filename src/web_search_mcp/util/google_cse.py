@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 
 import requests
@@ -45,6 +46,11 @@ class GoogleUnavailable(requests.RequestException):
 
 class _PathFailed(Exception):
     """Este caminho (canal ou direto) não serve agora: tente o próximo."""
+
+
+def _session_get(session: requests.Session, url: str, **kwargs) -> requests.Response:
+    """Ponto único de saída HTTP (os testes trocam este)."""
+    return session.get(url, **kwargs)
 
 
 class _BadToken(Exception):
@@ -100,6 +106,7 @@ class GoogleCSE:
         timeout: int = config.GOOGLE_CSE_TIMEOUT,
         direct_fallback: bool = config.GOOGLE_CSE_DIRECT_FALLBACK,
         max_results: int = config.SEARXNG_MAX_RESULTS,
+        hedge_seconds: float = config.GOOGLE_CSE_HEDGE_SECONDS,
     ):
         self.pool = pool
         self.cx = cx
@@ -112,6 +119,15 @@ class GoogleCSE:
         self._token_expires = 0.0
         self._down: str | None = None
         self._stats: Counter = Counter()
+        self.hedge_seconds = hedge_seconds
+        # Uma sessão por caminho, trocada quando a credencial SOCKS muda: a
+        # conexão (circuito + TLS) fica aberta entre as buscas.
+        self._sessions: dict[str, tuple[str, requests.Session]] = {}
+        # Tentativas rodam aqui, não na thread de quem busca: a irmã de uma
+        # tentativa lenta precisa sair sem esperar a primeira terminar, e a
+        # perdedora termina em segundo plano sem segurar a resposta.
+        self._attempts = ThreadPoolExecutor(max_workers=32, thread_name_prefix="cse")
+        self._warm_seconds = 0.0
 
     def search(self, query: str, time_range: str | None = None) -> list[dict]:
         """Sequência por query, sem sleep em nenhum passo:
@@ -121,41 +137,66 @@ class GoogleCSE:
         primeiro, já com circuito novo; 4. CSE pelo IP da máquina (se
         permitido); 5. GoogleUnavailable, e quem chamou cai no SearXNG.
 
+        Tentativa Tor que passa de hedge_seconds sem responder ganha a
+        próxima do roteiro em paralelo, e vale a primeira que voltar com
+        resultado. O direto nunca corre em paralelo: só entra quando todas as
+        tentativas Tor falharam.
+
         200 com zero resultados é "nada achado", não bloqueio: devolve [].
         """
-        route: list[TorChannel | None] = []
+        tor_route: list[TorChannel] = []
         first = self.pool.pick()
         if first is not None:
             # Três tentativas Tor em canais distintos quando há canais para
             # isso; com dois, a terceira volta ao primeiro, já renovado.
             second = self.pool.other(first) or first
             third = self.pool.other(first, exclude=(second,)) or first
-            route = [first, second, third]
-        if self.direct_fallback:
-            route.append(None)
+            tor_route = [first, second, third]
 
         self._count("consultas")
         failures: list[str] = []
-        for channel in route:
-            name = channel.name if channel else _DIRECT
-            try:
-                results = self._search_via(channel, query, time_range)
-            except _PathFailed as e:
-                failures.append(f"{name}: {e}")
-                self._count(f"bloqueio:{name}")
-                if channel is not None:
-                    channel.renew()
+        pending: dict = {}
+        queue: list[TorChannel | None] = list(tor_route)
+        direct_left = self.direct_fallback
+
+        def launch(channel: TorChannel | None) -> None:
+            pending[self._attempts.submit(self._attempt, channel, query, time_range)] = channel
+
+        while True:
+            if not pending:
+                if queue:
+                    launch(queue.pop(0))
+                elif direct_left:
+                    direct_left = False
+                    launch(None)
+                else:
+                    break
+            hedge = self.hedge_seconds if (queue and self.hedge_seconds > 0) else None
+            done, _ = wait(list(pending), timeout=hedge, return_when=FIRST_COMPLETED)
+            if not done:
+                # Ninguém respondeu no prazo: a próxima do roteiro corre junto.
+                self._count("hedge")
+                launch(queue.pop(0))
                 continue
-            if channel is not None:
-                channel.mark_ok()
-            self._count(f"caminho:{name}")
-            if failures:
-                self._count("failover")
-            logger.info(
-                "google_cse: query=%r caminho=%s tentativas=%d bloqueios=%s resultados=%d",
-                query, name, len(failures) + 1, failures or "-", len(results),
-            )
-            return results
+            for fut in done:
+                channel = pending.pop(fut)
+                name = channel.name if channel else _DIRECT
+                try:
+                    results = fut.result()
+                except _PathFailed as e:
+                    failures.append(f"{name}: {e}")
+                    if pending and queue:
+                        # Outra ainda corre; a vaga da que barrou não espera o prazo.
+                        launch(queue.pop(0))
+                    continue
+                self._count(f"caminho:{name}")
+                if failures:
+                    self._count("failover")
+                logger.info(
+                    "google_cse: query=%r caminho=%s tentativas=%d bloqueios=%s resultados=%d",
+                    query, name, len(failures) + 1, failures or "-", len(results),
+                )
+                return results
 
         reason = "; ".join(failures) or "nenhum caminho configurado"
         with self._lock:
@@ -163,6 +204,24 @@ class GoogleCSE:
         self._count("indisponivel")
         logger.error("google_cse: indisponível para query=%r: %s", query, reason)
         raise GoogleUnavailable(f"Google CSE indisponível ({reason})")
+
+    def _attempt(self, channel: TorChannel | None, query: str, time_range: str | None) -> list[dict]:
+        """Uma tentativa num caminho, com o efeito no canal: passou -> volta
+        ao rodízio; barrou -> circuito novo (e aquecido, se o aquecedor
+        estiver ligado). Roda também para a perdedora de uma corrida."""
+        name = channel.name if channel else _DIRECT
+        try:
+            results = self._search_via(channel, query, time_range)
+        except _PathFailed:
+            self._count(f"bloqueio:{name}")
+            if channel is not None:
+                channel.renew()
+                if self._warm_seconds > 0:
+                    self._attempts.submit(self._warm, channel)
+            raise
+        if channel is not None:
+            channel.mark_ok()
+        return results
 
     def _search_via(self, channel: TorChannel | None, query: str, time_range: str | None) -> list[dict]:
         proxies = channel.proxies() if channel else None
@@ -180,10 +239,27 @@ class GoogleCSE:
             self._drop_token(token)
             raise _PathFailed(f"token recusado mesmo renovado ({e})") from e
 
+    def _session(self, proxies: dict | None) -> requests.Session:
+        """Sessão do caminho. Credencial nova (canal renovado) = sessão nova:
+        a conexão velha saía pelo circuito barrado."""
+        key_url = proxies["https"] if proxies else _DIRECT
+        path = key_url.split("@", 1)[-1]  # host:porta do canal, sem a credencial
+        with self._lock:
+            current = self._sessions.get(path)
+            if current and current[0] == key_url:
+                return current[1]
+            session = requests.Session()
+            if proxies:
+                session.proxies.update(proxies)
+            self._sessions[path] = (key_url, session)
+        if current:
+            current[1].close()
+        return session
+
     def _get(self, url: str, params: dict, proxies: dict | None) -> requests.Response:
         try:
-            resp = requests.get(
-                url, params=params, headers=_HEADERS, cookies=_COOKIES,
+            resp = _session_get(
+                self._session(proxies), url, params=params, headers=_HEADERS, cookies=_COOKIES,
                 proxies=proxies, timeout=self.timeout,
             )
         except requests.RequestException as e:
@@ -191,6 +267,36 @@ class GoogleCSE:
         if not resp.ok:
             raise _PathFailed(f"HTTP {resp.status_code}")
         return resp
+
+    def _warm(self, channel: TorChannel) -> None:
+        """Abre circuito e TLS do canal até o Google pedindo só o cse.js.
+        Nunca levanta: aquecer é otimização, não pode quebrar nada."""
+        proxies = channel.proxies()
+        try:
+            text = self._get(_TOKEN_URL, {"cx": self.cx}, proxies).text
+            token = parse_token(text)
+        except Exception as e:  # noqa: BLE001
+            logger.info("google_cse: aquecimento de %s falhou: %s", channel.name, e)
+            return
+        with self._lock:
+            self._token, self._token_expires = token, time.monotonic() + _TOKEN_TTL_SECONDS
+
+    def start_warmer(self, every_seconds: float = config.GOOGLE_CSE_WARM_SECONDS) -> threading.Thread | None:
+        """Aquece todos os canais agora e de novo a cada every_seconds, e
+        liga o aquecimento do canal logo depois de cada renovação."""
+        if every_seconds <= 0 or not self.pool.channels:
+            return None
+        self._warm_seconds = every_seconds
+
+        def loop() -> None:
+            while True:
+                for channel in self.pool.channels:
+                    self._attempts.submit(self._warm, channel)
+                time.sleep(every_seconds)
+
+        thread = threading.Thread(target=loop, name="cse-warmer", daemon=True)
+        thread.start()
+        return thread
 
     def _get_token(self, proxies: dict | None, force: bool) -> dict[str, str]:
         with self._lock:
